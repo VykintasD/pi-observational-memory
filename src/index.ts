@@ -12,6 +12,7 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { registerCompactCommand } from "./commands/compact.js";
 import { registerConsolidateCommand } from "./commands/consolidate.js";
+import { registerDisplayCommand } from "./commands/display.js";
 import { registerStatusCommand } from "./commands/status.js";
 import { registerCompactionHook } from "./hooks/compaction-hook.js";
 import { registerCompactionTrigger } from "./hooks/compaction-trigger.js";
@@ -66,32 +67,9 @@ export default function observationalMemory(pi: ExtensionAPI): void {
 	});
 
 	pi.registerCommand("om", {
-		description: "Toggle observational memory (/om on|off) or set display mode (/om display bar|dense|off)",
+		description: "Toggle observational memory for this session (/om on, /om off)",
 		handler: async (args: string, ctx: any) => {
 			const arg = (args ?? "").trim().toLowerCase();
-			const display = /^display(?:\s+([a-z]+))?$/.exec(arg);
-			if (display) {
-				const requested = display[1];
-				if (!requested) {
-					const current = runtime.effectiveDisplayMode;
-					if (ctx.hasUI)
-						ctx.ui.notify(
-							`om display mode: ${current}${
-								current !== runtime.config.displayMode ? ` (override; config: ${runtime.config.displayMode})` : ""
-							} — /om display bar|dense|off`,
-							"info",
-						);
-					return;
-				}
-				if (requested !== "bar" && requested !== "dense" && requested !== "off") {
-					if (ctx.hasUI) ctx.ui.notify(`unknown display mode "${requested}" — use bar, dense, or off`, "error");
-					return;
-				}
-				runtime.setDisplayMode(requested);
-				if (ctx.hasUI)
-					ctx.ui.notify(`om display mode: ${requested} (this session only — set displayMode in settings to persist)`, "info");
-				return;
-			}
 			const next = arg === "on" ? true : arg === "off" ? false : !runtime.enabled;
 			if (next === runtime.enabled) {
 				if (ctx.hasUI) ctx.ui.notify(`om already ${next ? "on" : "off"}`, "info");
@@ -124,6 +102,7 @@ export default function observationalMemory(pi: ExtensionAPI): void {
 	registerStatusCommand(pi, runtime);
 	registerCompactCommand(pi, runtime);
 	registerConsolidateCommand(pi, runtime);
+	registerDisplayCommand(pi, runtime);
 
 	// Read-only durable-store access for the main agent (self-gates on the /om gate per session).
 	registerOmMemoryTool(pi, runtime);

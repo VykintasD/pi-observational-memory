@@ -154,9 +154,10 @@ and renders a permanent two-line widget instead — line 1 carries the three gau
 size vs target, consolidator state, session cost, last worker error). `off` renders no footer
 and no widget. The mode can live in a named profile and is reported by `/om:status`.
 
-Switch it live with **`/om display bar|dense|off`** — applies to the current session only,
-no file edit, no reload (`/om display` with no argument shows the active mode; `/om:status`
-flags an override against the configured value). Note the footer is a single-line surface, so
+Switch it live with **`/om:display bar|dense|off`** — applies to the current session only,
+no file edit, no reload (typing `/om:display ` offers the three modes as completions; bare
+`/om:display` shows the active mode, and `/om:status` flags an override against the configured
+value). Note the footer is a single-line surface, so
 the two-line dense mode necessarily renders as a widget above the input rather than in the
 status line itself.
 
