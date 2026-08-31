@@ -1,17 +1,27 @@
 /**
  * TUI observability for observational memory, driven entirely by the in-process orchestrator
- * (subprocess workers are headless). Three surfaces:
+ * (subprocess workers are headless). Display modes (config `displayMode`):
  *
- *   - Footer status ("om"): set once at attach, never cleared mid-session.
- *   - Single "om-workers" widget: all active/settling workers rendered side-by-side on
- *     one line so parallel observers appear next to each other, not stacked vertically.
+ *   - "bar" (default): footer gauge bars `O▕██░▏ C▕▏ X▕▏ $cost` plus the transient
+ *     "om-workers" widget line, shown only while workers run/settle:
  *       ◐ [observer]   ◐ [observer]   ✓ [observer] +4
- *   - Toasts via notify (start/finish/error), gated on hasUI by the caller.
+ *   - "dense": footer keeps a plain "om" label; a PERMANENT 2-line widget above the
+ *     editor carries the gauges WITH numbers plus a detail line. Worker indicators
+ *     merge into line 1 (no separate workers widget).
+ *       O▕██░░░░░░▏ 8.4k/15.0k  C▕██░░░░░░▏ 848/2.0k  X▕████░░░░▏ 38.0k/45.0k  ◐ [observer]
+ *       27 obs · 3 topics · journey 412/1.0k · consolidator idle · $0.052 (5 runs)
+ *   - "off": no footer, no widget.
+ *
+ *   Toasts via notify (start/finish/error) always fire, gated on hasUI by the caller.
  */
+
+import type { DisplayMode } from "../config.js";
+
+export type { DisplayMode };
 
 export type WorkerType = "observer" | "consolidator";
 
-/** Live token gauges shown in the footer, right of "○ om". */
+/** Live token gauges shown in the footer / dense widget, right of "○ om". */
 export interface FooterGauges {
 	/** Raw tokens accrued toward the next observer chunk. */
 	nextValue: number;
@@ -22,6 +32,24 @@ export interface FooterGauges {
 	/** Live context-window tokens toward the compaction threshold. */
 	ctxValue: number;
 	ctxMax: number;
+}
+
+/**
+ * Facts for the dense widget's detail line. Arrives in partial updates: the runtime pushes
+ * what it knows synchronously (activeObs) at gauge-refresh time, and the store facts
+ * (topicCount, journeyTokens) come back from CLI spawns via setDetails merges.
+ */
+export interface GaugeDetails {
+	/** Number of active (unconsolidated) observations in the pool. */
+	activeObs?: number;
+	/** Number of durable topics in the om store (session + global). */
+	topicCount?: number;
+	/** Current journey-row token estimate, or null when not yet fetched. */
+	journeyTokens?: number | null;
+	/** Journey target size (config), for the "412/1.0k" display. */
+	journeyTarget?: number;
+	/** Last worker error (caller-truncated), or undefined when none. */
+	lastError?: string;
 }
 
 interface Theme {
@@ -41,6 +69,7 @@ type WorkerState =
 
 const FOOTER_KEY = "om";
 const WORKERS_WIDGET_KEY = "om-workers";
+const DENSE_WIDGET_KEY = "om-detail";
 const SPINNER_FRAMES = ["◐", "◓", "◑", "◒"] as const;
 /** Separator between worker indicators on the single combined line. */
 const WORKER_SEP = "   ";
@@ -56,13 +85,22 @@ interface WorkerEntry {
 	settleTimer?: ReturnType<typeof setTimeout>;
 }
 
+/** Human-friendly token count: 848 → "848", 8400 → "8.4k", 900000 → "900k". */
+export function fmtTokens(n: number): string {
+	if (n < 1000) return String(n);
+	const k = n / 1000;
+	return `${k >= 100 ? String(Math.round(k)) : k.toFixed(1)}k`;
+}
+
 export class StatusController {
 	private ui: StatusUI | undefined;
+	private displayMode: DisplayMode = "bar";
 	private frame = 0;
 	private readonly workers = new Map<string, WorkerEntry>();
 	private spinnerTimer: ReturnType<typeof setInterval> | undefined;
 	private gauges: FooterGauges | undefined;
 	private cost: { costUsd: number; runs: number } | undefined;
+	private details: GaugeDetails | undefined;
 	private readonly spinnerIntervalMs: number;
 	private readonly settleMs: number;
 
@@ -71,9 +109,12 @@ export class StatusController {
 		this.settleMs = options.settleMs ?? 5000;
 	}
 
-	attach(ui: StatusUI): void {
+	attach(ui: StatusUI, displayMode: DisplayMode = "bar"): void {
 		this.ui = ui;
+		this.displayMode = displayMode;
+		if (this.displayMode === "off") return;
 		this.ui.setStatus(FOOTER_KEY, this.renderFooter());
+		if (this.displayMode === "dense") this.renderWidget();
 	}
 
 	detach(): void {
@@ -84,21 +125,29 @@ export class StatusController {
 		this.workers.clear();
 		this.gauges = undefined;
 		this.cost = undefined;
+		this.details = undefined;
 		this.ui?.setWidget(WORKERS_WIDGET_KEY, undefined);
+		this.ui?.setWidget(DENSE_WIDGET_KEY, undefined);
 		if (this.ui) this.ui.setStatus(FOOTER_KEY, undefined);
 		this.ui = undefined;
 	}
 
-	/** Update (or clear) the live footer gauges and re-render the footer in place. */
+	/** Update (or clear) the live gauges and re-render the surfaces in place. */
 	setGauges(gauges: FooterGauges | undefined): void {
 		this.gauges = gauges;
-		if (this.ui) this.ui.setStatus(FOOTER_KEY, this.renderFooter());
+		this.renderSurfaces();
 	}
 
-	/** Update the accumulated session cost shown in the footer and re-render in place. */
+	/** Update the accumulated session cost and re-render in place. */
 	setCost(costUsd: number, runs: number): void {
 		this.cost = { costUsd, runs };
-		if (this.ui) this.ui.setStatus(FOOTER_KEY, this.renderFooter());
+		this.renderSurfaces();
+	}
+
+	/** Merge a partial details update (any subset of GaugeDetails) and re-render in place. */
+	setDetails(partial: GaugeDetails): void {
+		this.details = { ...this.details, ...partial };
+		this.renderSurfaces();
 	}
 
 	workerStart(type: WorkerType, runId: string): void {
@@ -107,7 +156,7 @@ export class StatusController {
 		if (existing?.settleTimer) clearTimeout(existing.settleTimer);
 		this.workers.set(runId, { type, state: { kind: "running" } });
 		this.startSpinner();
-		this.renderWorkersWidget();
+		this.renderSurfaces();
 	}
 
 	workerDone(runId: string, delta?: number): void {
@@ -124,31 +173,32 @@ export class StatusController {
 		if (!entry) return;
 		if (entry.settleTimer) clearTimeout(entry.settleTimer);
 		entry.state = state;
-		this.renderWorkersWidget();
+		this.renderSurfaces();
 		entry.settleTimer = setTimeout(() => {
 			this.workers.delete(runId);
-			// Re-render the combined widget with this worker removed, or clear
-			// the widget entirely if the last worker just left.
-			this.renderWorkersWidget();
+			// Re-render with this worker removed (in dense mode the widget persists
+			// with just the gauges once the last worker settles).
+			this.renderSurfaces();
 			if (!this.hasRunningWorker()) this.stopSpinner();
 		}, this.settleMs);
 		entry.settleTimer.unref?.();
 		if (!this.hasRunningWorker()) this.stopSpinner();
 	}
 
-	private hasRunningWorker(): boolean {
+	private hasRunningWorker(type?: WorkerType): boolean {
 		for (const entry of this.workers.values()) {
-			if (entry.state.kind === "running") return true;
+			if (entry.state.kind === "running" && (!type || entry.type === type)) return true;
 		}
 		return false;
 	}
 
 	private startSpinner(): void {
-		if (this.spinnerTimer) return;
+		if (this.spinnerTimer || this.displayMode === "off") return;
 		this.spinnerTimer = setInterval(() => {
 			this.frame = (this.frame + 1) % SPINNER_FRAMES.length;
-			// One re-render of the combined widget per tick covers all running workers.
-			if (this.hasRunningWorker()) this.renderWorkersWidget();
+			// One re-render per tick covers all running workers (and, in dense mode,
+			// the whole 2-line widget).
+			if (this.hasRunningWorker()) this.renderSurfaces();
 		}, this.spinnerIntervalMs);
 		this.spinnerTimer.unref?.();
 	}
@@ -157,6 +207,14 @@ export class StatusController {
 		if (!this.spinnerTimer) return;
 		clearInterval(this.spinnerTimer);
 		this.spinnerTimer = undefined;
+	}
+
+	/** Re-render whatever surfaces the active display mode owns (footer always; widget per mode). */
+	private renderSurfaces(): void {
+		if (!this.ui) return;
+		if (this.displayMode === "off") return;
+		this.ui.setStatus(FOOTER_KEY, this.renderFooter());
+		this.renderWidget();
 	}
 
 	/** A compact colored fill bar, e.g. `▕████░░░░▏`. Filled cells use `over` (an alert color) past max. */
@@ -173,31 +231,32 @@ export class StatusController {
 		);
 	}
 
+	/** One gauge segment: `O` + bar (+ ` value/max` in dense mode). */
+	private gaugeSegment(label: string, value: number, max: number, withNumbers: boolean): string {
+		const theme = this.ui!.theme;
+		const base = `${theme.fg("muted", label)}${this.gaugeBar(value, max)}`;
+		return withNumbers ? `${base} ${fmtTokens(value)}/${fmtTokens(max)}` : base;
+	}
+
 	private renderFooter(): string {
 		const theme = this.ui?.theme;
 		if (!theme) return "om";
-		const base = `${theme.fg("success", "om")}`;
+		if (this.displayMode === "dense") return theme.fg("success", "om");
 		const g = this.gauges;
-		if (!g) return base;
-		const next = `${theme.fg("muted", "O")}${this.gaugeBar(g.nextValue, g.nextMax)}`;
-		const pool = `${theme.fg("muted", "C")}${this.gaugeBar(g.poolValue, g.poolMax)}`;
-		const ctx = `${theme.fg("muted", "X")}${this.gaugeBar(g.ctxValue, g.ctxMax)}`;
+		if (!g) return theme.fg("success", "om");
+		const next = this.gaugeSegment("O", g.nextValue, g.nextMax, false);
+		const pool = this.gaugeSegment("C", g.poolValue, g.poolMax, false);
+		const ctx = this.gaugeSegment("X", g.ctxValue, g.ctxMax, false);
 		const cost = this.cost ? ` ${theme.fg("dim", `$${this.cost.costUsd.toFixed(3)}`)}` : "";
 		return `${next}  ${pool}  ${ctx}${cost}`;
 	}
 
 	/**
-	 * Render all active/settling workers onto a single "om-workers" widget line so they
-	 * appear side-by-side rather than stacking vertically. Clears the widget when empty.
+	 * Worker indicator parts, shared by the bar-mode workers widget and the dense widget's
+	 * line 1: `◐ [observer]` / `✓ [observer] +4` / `✗ [consolidator]`.
 	 */
-	private renderWorkersWidget(): void {
-		const ui = this.ui;
-		if (!ui) return;
-		if (this.workers.size === 0) {
-			ui.setWidget(WORKERS_WIDGET_KEY, undefined);
-			return;
-		}
-		const theme = ui.theme;
+	private workerParts(): string[] {
+		const theme = this.ui!.theme;
 		const parts: string[] = [];
 		for (const entry of this.workers.values()) {
 			if (entry.state.kind === "running") {
@@ -212,6 +271,58 @@ export class StatusController {
 				parts.push(`${theme.fg("success", "✓")} ${theme.fg("muted", `[${entry.type}]`)}${delta}`);
 			}
 		}
-		ui.setWidget(WORKERS_WIDGET_KEY, [parts.join(WORKER_SEP)]);
+		return parts;
+	}
+
+	/**
+	 * The mode-owned widget surface:
+	 *  - bar: transient "om-workers" line, cleared when no workers remain.
+	 *  - dense: PERMANENT "om-detail" 2-line widget — line 1 gauges with numbers plus
+	 *    inline worker indicators, line 2 the detail line.
+	 */
+	private renderWidget(): void {
+		const ui = this.ui;
+		if (!ui) return;
+		const theme = ui.theme;
+
+		if (this.displayMode === "bar") {
+			if (this.workers.size === 0) {
+				ui.setWidget(WORKERS_WIDGET_KEY, undefined);
+				return;
+			}
+			ui.setWidget(WORKERS_WIDGET_KEY, [this.workerParts().join(WORKER_SEP)]);
+			return;
+		}
+
+		// dense
+		const g = this.gauges;
+		const line1: string[] = [];
+		if (g) {
+			line1.push(this.gaugeSegment("O", g.nextValue, g.nextMax, true));
+			line1.push(this.gaugeSegment("C", g.poolValue, g.poolMax, true));
+			line1.push(this.gaugeSegment("X", g.ctxValue, g.ctxMax, true));
+		} else {
+			line1.push(theme.fg("success", "om"));
+		}
+		const workers = this.workerParts();
+		if (workers.length > 0) line1.push(workers.join(WORKER_SEP));
+
+		const line2: string[] = [];
+		const d = this.details;
+		if (d?.activeObs !== undefined) line2.push(theme.fg("muted", `${d.activeObs} obs`));
+		if (d?.topicCount !== undefined) line2.push(theme.fg("muted", `${d.topicCount} topics`));
+		if (d?.journeyTokens != null && d.journeyTarget)
+			line2.push(
+				theme.fg("muted", `journey ${fmtTokens(d.journeyTokens)}/${fmtTokens(d.journeyTarget)}`),
+			);
+		line2.push(
+			theme.fg("muted", `consolidator ${this.hasRunningWorker("consolidator") ? "running" : "idle"}`),
+		);
+		if (this.cost) line2.push(theme.fg("dim", `$${this.cost.costUsd.toFixed(3)} (${this.cost.runs} runs)`));
+		if (d?.lastError) line2.push(theme.fg("error", `✗ ${d.lastError}`));
+
+		const lines = [line1.join("  ")];
+		if (line2.length > 0) lines.push(line2.join(" · "));
+		ui.setWidget(DENSE_WIDGET_KEY, lines);
 	}
 }

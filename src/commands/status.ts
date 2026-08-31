@@ -26,6 +26,7 @@ export function registerStatusCommand(pi: ExtensionAPI, runtime: Runtime): void 
 
 			const lines = [
 				`om status${runtime.config.activeProfile ? ` (profile: ${runtime.config.activeProfile})` : ""}`,
+				`  display mode: ${runtime.config.displayMode}`,
 				`  observers in flight: ${runtime.observersInFlight.size} / ${runtime.config.observerConcurrency}`,
 				`  active observations: ${folded.activeObservations.length}`,
 				`  next observer: ${sinceObservation.toLocaleString()} / ${runtime.config.chunkTokens.toLocaleString()} tok`,

@@ -3,6 +3,9 @@ import { join } from "node:path";
 import type { ModelThinkingLevel } from "@earendil-works/pi-ai";
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
 
+/** TUI display mode (see Config.displayMode). */
+export type DisplayMode = "bar" | "dense" | "off";
+
 export interface ConfiguredModel {
 	provider: string;
 	id: string;
@@ -43,6 +46,13 @@ export interface Config {
 	resumeAfterMidRunCompaction: boolean;
 	/** Power-user setting: disable all triggers (distinct from the on/off gate). */
 	passive: boolean;
+	/**
+	 * TUI display mode (TUI only; toasts always fire). "bar" — current behavior: footer gauge
+	 * bars plus the transient workers widget. "dense" — permanent 2-line widget above the
+	 * editor: gauges with numbers plus a detail line (obs/topics/journey/consolidator/cost);
+	 * worker spinners merge into line 1. "off" — no footer, no widget.
+	 */
+	displayMode: DisplayMode;
 	/** Emit the NDJSON debug log. */
 	debugLog: boolean;
 	/**
@@ -61,6 +71,7 @@ export const DEFAULTS: Config = {
 	tailTokens: 20_000,
 	journeyTargetTokens: 1_000,
 	observerConcurrency: 4,
+	displayMode: "bar",
 	resumeAfterMidRunCompaction: true,
 	models: {
 		observer: { provider: "openrouter", id: "z-ai/glm-5.3", thinking: "low" },
@@ -134,6 +145,9 @@ function normalizeSettingsConfig(value: Record<string, unknown>, base: Config): 
 	if (value.chunkOverlapTokens === 0) normalized.chunkOverlapTokens = 0;
 	if (typeof value.resumeAfterMidRunCompaction === "boolean")
 		normalized.resumeAfterMidRunCompaction = value.resumeAfterMidRunCompaction;
+	const displayModes = ["bar", "dense", "off"] as const;
+	if (typeof value.displayMode === "string" && (displayModes as readonly string[]).includes(value.displayMode))
+		normalized.displayMode = value.displayMode as DisplayMode;
 	if (typeof value.passive === "boolean") normalized.passive = value.passive;
 	if (typeof value.debugLog === "boolean") normalized.debugLog = value.debugLog;
 	if (isRecord(value.models)) {

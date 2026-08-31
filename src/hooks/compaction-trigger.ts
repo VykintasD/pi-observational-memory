@@ -102,7 +102,7 @@ export function registerCompactionTrigger(pi: ExtensionAPI, runtime: Runtime): v
 					);
 				} catch (error) {
 					const msg = error instanceof Error ? error.message : String(error);
-					runtime.lastWorkerError = `resume failed: ${msg}`;
+					runtime.setLastWorkerError(`resume failed: ${msg}`);
 					if (hasUI) ui?.notify(`om: resume failed — ${msg}`, "error");
 				}
 			},

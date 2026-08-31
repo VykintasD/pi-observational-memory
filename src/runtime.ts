@@ -1,6 +1,8 @@
 import { type Config, DEFAULTS, loadConfig } from "./config.js";
 import { foldLedger, poolTokens, rawTokensSinceObservationCoverage, sumSessionCost, type Entry } from "./ledger/index.js";
 import { omRunsRoot } from "./memory/db.js";
+import { journeyGet, topicList } from "./memory/paths.js";
+import { estimateStringTokens } from "./tokens.js";
 import { StatusController } from "./ui/status-controller.js";
 
 /**
@@ -56,8 +58,11 @@ export class Runtime {
 	compactInFlight = false;
 	compactHookInFlight = false;
 
-	/** Last worker error message, surfaced by /om:status. */
+	/** Last worker error message, surfaced by /om:status and the dense detail line. */
 	lastWorkerError: string | undefined;
+
+	/** Guards so at most one store-details refresh (CLI spawns) is in flight. */
+	private detailsRefreshInFlight = false;
 
 	/**
 	 * Whether the last compaction waited for in-flight observers or skipped the wait (fast path:
@@ -115,7 +120,10 @@ export class Runtime {
 		this.configLoaded = true;
 	}
 
-	/** Recompute the live footer gauges (next-observer + pool + context) from the current branch. */
+	/**
+	 * Recompute the live gauges (next-observer + pool + context) from the current branch and
+	 * push the synchronously-known detail fact (active observation count) for the dense line.
+	 */
 	refreshFooterGauges(branch: Entry[], contextTokens?: number | null): void {
 		if (!this.enabled) return;
 		const folded = foldLedger(branch);
@@ -127,6 +135,38 @@ export class Runtime {
 			ctxValue: contextTokens ?? 0,
 			ctxMax: this.config.compactAtContextTokens,
 		});
+		this.status.setDetails({ activeObs: folded.activeObservations.length });
+	}
+
+	/**
+	 * Refresh the dense detail line's store facts (topic count + journey size) from the om CLI.
+	 * Coalesced (at most one in flight) and fire-and-forget: a missed update is harmless because
+	 * the next gauge refresh re-triggers it. Non-fatal on error — the line stays incomplete.
+	 */
+	refreshStoreDetails(): void {
+		if (!this.enabled || this.detailsRefreshInFlight) return;
+		this.detailsRefreshInFlight = true;
+		void (async () => {
+			try {
+				const topics = await topicList(this.sessionId);
+				const journey = await journeyGet(this.sessionId);
+				this.status.setDetails({
+					topicCount: topics.length,
+					journeyTokens: journey ? estimateStringTokens(journey) : null,
+					journeyTarget: this.config.journeyTargetTokens,
+				});
+			} catch {
+				// detail line simply stays incomplete until the next refresh
+			} finally {
+				this.detailsRefreshInFlight = false;
+			}
+		})();
+	}
+
+	/** Record a worker error (surfaced by /om:status and the dense detail line). */
+	setLastWorkerError(message: string): void {
+		this.lastWorkerError = message;
+		this.status.setDetails({ lastError: message });
 	}
 
 	/**

@@ -114,7 +114,8 @@ Namespace `observational-memory` in `~/.pi/agent/settings.json` (global) or
       "consolidator": { "provider": "anthropic", "id": "claude-sonnet-4-6", "thinking": "medium" }
     },
     "passive": false,
-    "debugLog": false
+    "debugLog": false,
+    "displayMode": "bar"               // "bar" | "dense" | "off" — TUI footer rendering
   }
 }
 ```
@@ -143,6 +144,15 @@ project < env). `/om:status` shows the active profile.
 
 `PI_OM_PASSIVE=1` forces `passive` (disables all triggers) for clean `/tree` testing.
 `passive` is a power-user setting distinct from the on/off gate.
+
+### Display mode (`displayMode`)
+
+`bar` (default) is the current look: gauges live in the footer status line, and worker
+indicators stack as transient widgets above it. `dense` keeps the footer as a bare `om` label
+and renders a permanent two-line widget instead — line 1 carries the three gauges with numeric
+`value/max` readouts (plus worker indicators), line 2 a detail line (active obs, topics, journey
+size vs target, consolidator state, session cost, last worker error). `off` renders no footer
+and no widget. The mode can live in a named profile; it is reported by `/om:status`.
 
 ## Development
 

@@ -38,7 +38,7 @@ export default function observationalMemory(pi: ExtensionAPI): void {
 
 	function attachIfEnabled(ctx: any): void {
 		if (runtime.enabled && ctx.mode === "tui" && ctx.hasUI && ctx.ui) {
-			runtime.status.attach(ctx.ui);
+			runtime.status.attach(ctx.ui, runtime.config.displayMode);
 		} else {
 			runtime.status.detach();
 		}
@@ -56,6 +56,7 @@ export default function observationalMemory(pi: ExtensionAPI): void {
 		}
 		attachIfEnabled(ctx);
 		runtime.refreshFooterGauges(branch, ctx.getContextUsage?.()?.tokens ?? null);
+		runtime.refreshStoreDetails();
 		runtime.refreshCost(ctx.sessionManager.getEntries() as Entry[]);
 	});
 
@@ -81,6 +82,7 @@ export default function observationalMemory(pi: ExtensionAPI): void {
 				await ensureSessionMemory(ctx);
 				attachIfEnabled(ctx);
 				runtime.refreshFooterGauges(ctx.sessionManager.getBranch() as Entry[], ctx.getContextUsage?.()?.tokens ?? null);
+				runtime.refreshStoreDetails();
 				runtime.refreshCost(ctx.sessionManager.getEntries() as Entry[]);
 			} else {
 				runtime.abortAllWorkers();

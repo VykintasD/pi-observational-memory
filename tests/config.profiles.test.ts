@@ -135,3 +135,38 @@ describe("loadConfig (profile across settings files)", () => {
 		expect(config.activeProfile).toBeUndefined();
 	});
 });
+
+describe("loadConfig (displayMode normalization)", () => {
+	let tmp: string;
+	let globalPath: string;
+	let projectPath: string;
+
+	function writeGlobal(obj: unknown): void {
+		writeFileSync(globalPath, JSON.stringify(obj, null, 2));
+	}
+
+	beforeEach(() => {
+		tmp = mkdtempSync(join(tmpdir(), "om-config-"));
+		globalPath = join(tmp, "global-settings.json");
+		projectPath = join(tmp, ".pi", "settings.json");
+	});
+	afterEach(() => rmSync(tmp, { recursive: true, force: true }));
+
+	it("defaults to bar and accepts every valid mode", () => {
+		expect(loadConfig(tmp, {}, { globalPath, projectPath }).displayMode).toBe("bar");
+		writeGlobal({ "observational-memory": { displayMode: "dense" } });
+		expect(loadConfig(tmp, {}, { globalPath, projectPath }).displayMode).toBe("dense");
+		writeGlobal({ "observational-memory": { displayMode: "off" } });
+		expect(loadConfig(tmp, {}, { globalPath, projectPath }).displayMode).toBe("off");
+	});
+
+	it("an invalid displayMode falls back to the default", () => {
+		writeGlobal({ "observational-memory": { displayMode: "sparkles" } });
+		expect(loadConfig(tmp, {}, { globalPath, projectPath }).displayMode).toBe(DEFAULTS.displayMode);
+	});
+
+	it("a profile can set displayMode", () => {
+		writeGlobal({ "observational-memory": { profile: "d", profiles: { d: { displayMode: "dense" } } } });
+		expect(loadConfig(tmp, {}, { globalPath, projectPath }).displayMode).toBe("dense");
+	});
+});

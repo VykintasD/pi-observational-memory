@@ -140,12 +140,13 @@ async function dispatchConsolidator(
 
 		runtime.status.workerDone(runId, toDrop.length);
 		runtime.refreshFooterGauges(ctx.sessionManager.getBranch(), ctx.getContextUsage?.()?.tokens ?? null);
+		runtime.refreshStoreDetails();
 		if (ctx.hasUI && ctx.ui) {
 			runtime.queueToast(`om: consolidator promoted ${toDrop.length} obs`, "info", ctx.ui.notify.bind(ctx.ui));
 		}
 	} catch (error) {
 		const message = error instanceof Error ? error.message : String(error);
-		runtime.lastWorkerError = message;
+		runtime.setLastWorkerError(message);
 		runtime.status.workerError(runId);
 		if (ctx.hasUI) ctx.ui?.notify(`om: consolidator failed: ${message}`, "error");
 	} finally {
