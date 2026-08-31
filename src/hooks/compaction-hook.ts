@@ -2,6 +2,7 @@ import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { renderMemoryMap } from "../memory/index-render.js";
 import { listTopics, readJourney } from "../memory/paths.js";
 import type { Runtime } from "../runtime.js";
+import { estimateEntryTokens } from "../tokens.js";
 import {
 	buildCompactionProjection,
 	entryIndexById,
@@ -35,11 +36,26 @@ function firstKeptAfterBoundary(branch: Entry[], boundaryIndex: number): Entry |
 }
 
 /**
- * Snap pi's proposed `firstKeptEntryId` to an observation chunk boundary so the verbatim tail
- * starts exactly where a chunk ends — no chunk straddles the cutoff, so nothing is both
- * rendered into the summary and kept verbatim (and nothing is lost). Among boundaries whose
- * next entry is a valid cut point, pick the one whose resulting tail is closest to
- * `tailTokens`. Falls back to pi's proposal when no boundary qualifies (`tail` undefined).
+ * Snap pi's proposed `firstKeptEntryId` to a safe cutoff so the verbatim tail is as close to
+ * `tailTokens` as possible.
+ *
+ * Two kinds of cutoff are considered:
+ * 1. **Chunk boundaries** (committed `om.observations.recorded` coversUpToId): the tail starts
+ *    exactly where an observed chunk ends — nothing before the cutoff is unsummarized, and
+ *    nothing is both rendered into the summary and kept verbatim.
+ * 2. **Sub-chunk cuts** inside the in-progress chunk (the source entries after the LAST
+ *    committed boundary, which no observation covers yet). Without these, a large `chunkTokens`
+ *    (set to save observer calls) forces the tail to a whole chunk even when `tailTokens` is
+ *    smaller — the post-compaction floor then sits at or above the compaction trigger and
+ *    re-fires every turn. The head of the in-progress chunk discarded by such a cut is not
+ *    summarized *yet*: the observer's next committed chunk covers it and the projection folds
+ *    it into the NEXT compaction's summary (the branch is never truncated, so coverage always
+ *    resolves). The cut is therefore loss-free across the compaction cycle, at the cost of a
+ *    brief gap where that segment is in neither the summary nor the verbatim tail.
+ *
+ * Among all candidates whose entry is a valid cut point, the one whose resulting tail is closest
+ * to `tailTokens` wins; on a tie the chunk-boundary cut wins (no gap). Falls back to pi's
+ * proposal when nothing qualifies (`tail` undefined).
  */
 export function snapCutoff(
 	branch: Entry[],
@@ -47,19 +63,46 @@ export function snapCutoff(
 	tailTokens: number,
 ): { firstKeptId: string; tail: number | undefined } {
 	const boundaries = chunkBoundaryIndices(branch);
+
+	// Suffix sums of estimated source tokens: tailOf(i) = estimated tokens of source entries
+	// from index i to the tip — the verbatim tail if branch[i] were firstKept.
+	const suffix = new Array<number>(branch.length + 1).fill(0);
+	for (let i = branch.length - 1; i >= 0; i--) {
+		suffix[i] = suffix[i + 1] + (isSourceEntry(branch[i]) ? estimateEntryTokens(branch[i]) : 0);
+	}
+
 	let bestId: string | undefined;
 	let bestTail: number | undefined;
 	let bestDelta = Number.POSITIVE_INFINITY;
-
-	for (const boundaryIndex of boundaries) {
-		const firstKept = firstKeptAfterBoundary(branch, boundaryIndex);
-		if (!firstKept) continue;
-		const tail = rawTokensAfterIndex(branch, boundaryIndex);
+	const consider = (entry: Entry, tail: number) => {
 		const delta = Math.abs(tail - tailTokens);
 		if (delta < bestDelta) {
 			bestDelta = delta;
-			bestId = firstKept.id;
+			bestId = entry.id;
 			bestTail = tail;
+		}
+	};
+
+	// 1. Chunk-boundary candidates. `tail` includes the firstKept entry itself, matching
+	//    rawTokensAfterIndex(boundary) — entries between the boundary and firstKept are
+	//    non-source (e.g. om.* custom entries) and contribute no tokens.
+	for (const boundaryIndex of boundaries) {
+		const firstKept = firstKeptAfterBoundary(branch, boundaryIndex);
+		if (!firstKept) continue;
+		consider(firstKept, suffix[boundaryIndex + 1]);
+	}
+
+	// 2. Sub-chunk candidates: valid cut points in the in-progress chunk (strictly after the
+	//    last committed boundary). Scanned oldest-first so a tie keeps the earliest cut —
+	//    discarding the least — and step 1 ran first so a true tie still prefers the boundary.
+	//    Only when at least one boundary is committed: with none, the whole branch is the
+	//    in-progress chunk and the old behavior (pi's proposal + waiting for the first
+	//    observation to commit so it can be folded in) is deliberately preserved.
+	if (boundaries.length > 0) {
+		for (let i = boundaries[boundaries.length - 1] + 1; i < branch.length; i++) {
+			const entry = branch[i];
+			if (!isSourceEntry(entry) || !isValidCutPoint(entry)) continue;
+			consider(entry, suffix[i]);
 		}
 	}
 
