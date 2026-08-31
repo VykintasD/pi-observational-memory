@@ -1,5 +1,11 @@
 # Observational Memory — Implementation Plan (v1)
 
+> **Superseded (durable tier, 2026-08-31):** the file-based long-term tier described below
+> (`.memory/<sessionId>/` topic files + `INDEX.md` + `JOURNEY.md`) was replaced by a single
+> global SQLite store (`~/.pi/agent/om/om.db`, accessed via the `cli/om` Go CLI, rows keyed by
+> session id, `fork-copy` seeding, `om_memory` master tool). The rest of this plan (ledger,
+> observers, compaction, worker spawning) still stands. Current architecture: see `README.md`.
+
 > Companion to `Observational memory — design.md`. The design doc is the *what/why*;
 > this is the *how*. Decisions 1–12 from the design are assumed. The open items below
 > were resolved with the user before writing this plan (see **Locked decisions**).
