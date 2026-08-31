@@ -19,6 +19,7 @@ import { registerConsolidatorTrigger } from "./hooks/consolidator-trigger.js";
 import { registerObserverTrigger } from "./hooks/observer-trigger.js";
 import { OM_ENABLED, type Entry } from "./ledger/index.js";
 import { ensureOmDb } from "./memory/db.js";
+import { registerOmMemoryTool } from "./memory/om-memory-tool.js";
 import { ensureSessionMemory } from "./memory/session.js";
 import { Runtime } from "./runtime.js";
 
@@ -98,4 +99,7 @@ export default function observationalMemory(pi: ExtensionAPI): void {
 	registerStatusCommand(pi, runtime);
 	registerCompactCommand(pi, runtime);
 	registerConsolidateCommand(pi, runtime);
+
+	// Read-only durable-store access for the main agent (self-gates on the /om gate per session).
+	registerOmMemoryTool(pi, runtime);
 }

@@ -45,6 +45,11 @@ export interface Config {
 	passive: boolean;
 	/** Emit the NDJSON debug log. */
 	debugLog: boolean;
+	/**
+	 * Metadata (set by loadConfig, not a tunable): name of the active named profile, if any.
+	 * Shown by /om status.
+	 */
+	activeProfile?: string;
 }
 
 export const DEFAULTS: Config = {
@@ -96,8 +101,21 @@ function normalizeModel(value: unknown, fallback: ConfiguredModel): ConfiguredMo
 	return model;
 }
 
-function normalizeSettingsConfig(value: Record<string, unknown>, base: Config): Partial<Config> {
-	const normalized: Partial<Config> = {};
+/**
+ * The normalized shape of one settings block: like Partial<Config> but with models allowed
+ * to be present per-model (a block may set only `models.observer`).
+ */
+type NormalizedSettings = Omit<Partial<Config>, "models"> & { models?: Partial<Config["models"]> };
+
+/** One parsed settings source (global or project file): the normalized overrides plus the
+ * requested profile name (only when the profile actually exists). */
+interface NamespacedSource {
+	partial: Partial<Config>;
+	profile?: string;
+}
+
+function normalizeSettingsConfig(value: Record<string, unknown>, base: Config): NormalizedSettings {
+	const normalized: NormalizedSettings = {};
 	const numberKeys = [
 		"chunkTokens",
 		"chunkOverlapTokens",
@@ -119,12 +137,51 @@ function normalizeSettingsConfig(value: Record<string, unknown>, base: Config): 
 	if (typeof value.passive === "boolean") normalized.passive = value.passive;
 	if (typeof value.debugLog === "boolean") normalized.debugLog = value.debugLog;
 	if (isRecord(value.models)) {
-		normalized.models = {
-			observer: normalizeModel(value.models.observer, base.models.observer),
-			consolidator: normalizeModel(value.models.consolidator, base.models.consolidator),
-		};
+		const models: Partial<Config["models"]> = {};
+		if (isRecord(value.models.observer)) models.observer = normalizeModel(value.models.observer, base.models.observer);
+		if (isRecord(value.models.consolidator))
+			models.consolidator = normalizeModel(value.models.consolidator, base.models.consolidator);
+		if (models.observer || models.consolidator) normalized.models = models;
 	}
 	return normalized;
+}
+
+/**
+ * Resolve one `observational-memory` settings block against `base`, with named-profile support.
+ *
+ * A block may name a profile (`"profile": "small-ctx"`) and define profiles as nested blocks:
+ * ```json
+ * "observational-memory": {
+ *   "profile": "small-ctx",
+ *   "profiles": {
+ *     "small-ctx": {
+ *       "chunkTokens": 4000, "tailTokens": 3000, "poolTargetTokens": 3000,
+ *       "consolidateAtPoolTokens": 5000, "compactAtContextTokens": 18000
+ *     }
+ *   }
+ * }
+ * ```
+ * Precedence inside one file: the profile's values first, then the block's direct keys —
+ * so a single direct key overrides one knob of the active profile. Models merge per-model
+ * across profile and direct keys. An unknown profile name is ignored (no overrides, no name
+ * reported). Across files the usual order holds (defaults < global < project < env); a
+ * profile in either file applies at that file's layer.
+ */
+export function resolveNamespacedBlock(nested: Record<string, unknown>, base: Config): NamespacedSource {
+	const { profile: rawProfile, profiles: rawProfiles, ...direct } = nested;
+	const profileBlock =
+		typeof rawProfile === "string" && rawProfile.length > 0 && isRecord(rawProfiles) ? rawProfiles[rawProfile] : undefined;
+	const profileNorm = isRecord(profileBlock) ? normalizeSettingsConfig(profileBlock, base) : {};
+	const directNorm = normalizeSettingsConfig(direct, base);
+	// NormalizedSettings allows per-model presence; only after filling in from base does the models
+	// field become a complete Config["models"].
+	const partial = { ...profileNorm, ...directNorm } as Partial<Config>;
+	const models: Partial<Config["models"]> = { ...profileNorm.models, ...directNorm.models };
+	if (models.observer || models.consolidator) partial.models = { ...base.models, ...models };
+	return {
+		partial,
+		profile: isRecord(profileBlock) ? (rawProfile as string) : undefined,
+	};
 }
 
 export function readEnvConfig(env: NodeJS.ProcessEnv = process.env): Partial<Config> {
@@ -136,32 +193,39 @@ export function readEnvConfig(env: NodeJS.ProcessEnv = process.env): Partial<Con
 	return {};
 }
 
-function readNamespacedConfig(path: string, base: Config): Partial<Config> {
-	if (!existsSync(path)) return {};
+function readNamespacedConfig(path: string, base: Config): NamespacedSource {
+	if (!existsSync(path)) return { partial: {} };
 	try {
 		const raw = JSON.parse(readFileSync(path, "utf-8")) as Record<string, unknown>;
 		const nested = raw[SETTINGS_KEY];
-		return isRecord(nested) ? normalizeSettingsConfig(nested, base) : {};
+		return isRecord(nested) ? resolveNamespacedBlock(nested, base) : { partial: {} };
 	} catch {
-		return {};
+		return { partial: {} };
 	}
 }
 
-export function loadConfig(cwd: string, env: NodeJS.ProcessEnv = process.env): Config {
-	const globalPath = join(getAgentDir(), "settings.json");
-	const projectPath = join(cwd, ".pi", "settings.json");
-	const globalConfig = readNamespacedConfig(globalPath, DEFAULTS);
-	const projectConfig = readNamespacedConfig(projectPath, DEFAULTS);
+export function loadConfig(
+	cwd: string,
+	env: NodeJS.ProcessEnv = process.env,
+	paths: { globalPath?: string; projectPath?: string } = {},
+): Config {
+	const globalPath = paths.globalPath ?? join(getAgentDir(), "settings.json");
+	const projectPath = paths.projectPath ?? join(cwd, ".pi", "settings.json");
+	const globalSource = readNamespacedConfig(globalPath, DEFAULTS);
+	const projectSource = readNamespacedConfig(projectPath, DEFAULTS);
 	const envConfig = readEnvConfig(env);
-	return {
+	const config: Config = {
 		...DEFAULTS,
-		...globalConfig,
-		...projectConfig,
+		...globalSource.partial,
+		...projectSource.partial,
 		...envConfig,
 		models: {
 			...DEFAULTS.models,
-			...globalConfig.models,
-			...projectConfig.models,
+			...globalSource.partial.models,
+			...projectSource.partial.models,
 		},
 	};
+	const activeProfile = projectSource.profile ?? globalSource.profile;
+	if (activeProfile !== undefined) config.activeProfile = activeProfile;
+	return config;
 }

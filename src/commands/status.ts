@@ -25,7 +25,7 @@ export function registerStatusCommand(pi: ExtensionAPI, runtime: Runtime): void 
 			const { costUsd, runs } = sumSessionCost(ctx.sessionManager.getEntries() as Entry[]);
 
 			const lines = [
-				`om status`,
+				`om status${runtime.config.activeProfile ? ` (profile: ${runtime.config.activeProfile})` : ""}`,
 				`  observers in flight: ${runtime.observersInFlight.size} / ${runtime.config.observerConcurrency}`,
 				`  active observations: ${folded.activeObservations.length}`,
 				`  next observer: ${sinceObservation.toLocaleString()} / ${runtime.config.chunkTokens.toLocaleString()} tok`,
