@@ -85,6 +85,12 @@ func dsnEscapePath(p string) string {
 }
 
 func openDB(path string, readOnly bool) *sql.DB {
+	if !readOnly {
+		// SQLite does not create missing parent directories.
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			die(2, "open %s: %v", path, err)
+		}
+	}
 	var dsn string
 	esc := dsnEscapePath(path)
 	if readOnly {
