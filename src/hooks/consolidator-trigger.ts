@@ -82,6 +82,16 @@ export function evaluateConsolidatorTrigger(pi: ExtensionAPI, runtime: Runtime, 
 	if (!runtime.enabled || runtime.config.passive) return;
 	if (runtime.consolidatorInFlight) return;
 
+	if (!runtime.sessionId) {
+		// The consolidator's memory tools are keyed by session id; an empty id means the
+		// runtime state is out of sync (gate on without a session). Refuse locally instead of
+		// spawning a worker that dies at its entry point with a cryptic env error.
+		const message = "consolidator skipped: no session id (runtime state out of sync)";
+		runtime.setLastWorkerError(message);
+		if (ctx.hasUI) ctx.ui?.notify(`om: ${message}`, "error");
+		return;
+	}
+
 	const branch = ctx.sessionManager.getBranch();
 	const active = foldLedger(branch).activeObservations;
 	if (poolTokens(active) < runtime.config.consolidateAtPoolTokens) return;
@@ -116,7 +126,7 @@ async function dispatchConsolidator(
 			sessionName: `om-consolidator-${runId}`,
 			kickoffPrompt: prompt,
 		});
-		const env = buildWorkerEnv("consolidator", { runsRoot: runtime.runsRoot, runId });
+		const env = buildWorkerEnv("consolidator", { runsRoot: runtime.runsRoot, runId, sessionId: runtime.sessionId });
 		const exit = await spawnWorker({ argv, cwd: runtime.runsRoot, env, signal: controller.signal });
 		// Capture cost before the exit-code check so a partial run's spend is still recorded.
 		recordWorkerCost(pi, runtime, ctx, "consolidator", runId);
