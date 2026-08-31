@@ -1,4 +1,4 @@
-import { type Config, DEFAULTS, loadConfig } from "./config.js";
+import { type Config, type DisplayMode, DEFAULTS, loadConfig } from "./config.js";
 import { foldLedger, poolTokens, rawTokensSinceObservationCoverage, sumSessionCost, type Entry } from "./ledger/index.js";
 import { omRunsRoot } from "./memory/db.js";
 import { journeyGet, topicList } from "./memory/paths.js";
@@ -60,6 +60,14 @@ export class Runtime {
 
 	/** Last worker error message, surfaced by /om:status and the dense detail line. */
 	lastWorkerError: string | undefined;
+
+	/** Session-scoped displayMode override set by `/om display` (no file edit, no reload). */
+	displayModeOverride: DisplayMode | undefined;
+
+	/** The display mode in effect: the `/om display` override when set, else the config value. */
+	get effectiveDisplayMode(): DisplayMode {
+		return this.displayModeOverride ?? this.config.displayMode;
+	}
 
 	/** Guards so at most one store-details refresh (CLI spawns) is in flight. */
 	private detailsRefreshInFlight = false;
@@ -161,6 +169,12 @@ export class Runtime {
 				this.detailsRefreshInFlight = false;
 			}
 		})();
+	}
+
+	/** Apply a session-scoped display mode (via /om display) and re-render the TUI live. */
+	setDisplayMode(mode: DisplayMode): void {
+		this.displayModeOverride = mode;
+		this.status.setDisplayMode(mode);
 	}
 
 	/** Record a worker error (surfaced by /om:status and the dense detail line). */

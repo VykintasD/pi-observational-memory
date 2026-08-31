@@ -38,7 +38,7 @@ export default function observationalMemory(pi: ExtensionAPI): void {
 
 	function attachIfEnabled(ctx: any): void {
 		if (runtime.enabled && ctx.mode === "tui" && ctx.hasUI && ctx.ui) {
-			runtime.status.attach(ctx.ui, runtime.config.displayMode);
+			runtime.status.attach(ctx.ui, runtime.effectiveDisplayMode);
 		} else {
 			runtime.status.detach();
 		}
@@ -66,9 +66,32 @@ export default function observationalMemory(pi: ExtensionAPI): void {
 	});
 
 	pi.registerCommand("om", {
-		description: "Toggle observational memory for this session (/om on, /om off)",
+		description: "Toggle observational memory (/om on|off) or set display mode (/om display bar|dense|off)",
 		handler: async (args: string, ctx: any) => {
 			const arg = (args ?? "").trim().toLowerCase();
+			const display = /^display(?:\s+([a-z]+))?$/.exec(arg);
+			if (display) {
+				const requested = display[1];
+				if (!requested) {
+					const current = runtime.effectiveDisplayMode;
+					if (ctx.hasUI)
+						ctx.ui.notify(
+							`om display mode: ${current}${
+								current !== runtime.config.displayMode ? ` (override; config: ${runtime.config.displayMode})` : ""
+							} — /om display bar|dense|off`,
+							"info",
+						);
+					return;
+				}
+				if (requested !== "bar" && requested !== "dense" && requested !== "off") {
+					if (ctx.hasUI) ctx.ui.notify(`unknown display mode "${requested}" — use bar, dense, or off`, "error");
+					return;
+				}
+				runtime.setDisplayMode(requested);
+				if (ctx.hasUI)
+					ctx.ui.notify(`om display mode: ${requested} (this session only — set displayMode in settings to persist)`, "info");
+				return;
+			}
 			const next = arg === "on" ? true : arg === "off" ? false : !runtime.enabled;
 			if (next === runtime.enabled) {
 				if (ctx.hasUI) ctx.ui.notify(`om already ${next ? "on" : "off"}`, "info");

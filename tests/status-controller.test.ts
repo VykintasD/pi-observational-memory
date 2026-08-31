@@ -125,6 +125,43 @@ describe("StatusController dense display mode", () => {
 	});
 });
 
+describe("StatusController live display mode switching (/om display)", () => {
+	const gauges = { nextValue: 8400, nextMax: 15000, poolValue: 848, poolMax: 2000, ctxValue: 38000, ctxMax: 45000 };
+
+	it("bar → dense: footer becomes a bare label and the permanent widget appears", () => {
+		const { ui, footer, widget } = fakeUI();
+		const sc = new StatusController();
+		sc.attach(ui);
+		sc.setGauges(gauges);
+		sc.setDisplayMode("dense");
+		expect(footer()).toBe("om");
+		expect(widget("om-detail")![0]).toContain("848/2.0k");
+		expect(widget("om-workers")).toBeUndefined();
+	});
+
+	it("dense → off tears down footer and widget; off → bar restores the gauged footer", () => {
+		const { ui, footer, widget } = fakeUI();
+		const sc = new StatusController();
+		sc.attach(ui, "dense");
+		sc.setGauges(gauges);
+		sc.setDisplayMode("off");
+		expect(footer()).toBeUndefined();
+		expect(widget("om-detail")).toBeUndefined();
+		sc.setDisplayMode("bar");
+		expect(footer()).toContain("O");
+		expect(widget("om-detail")).toBeUndefined();
+	});
+
+	it("is a no-op when the mode is unchanged", () => {
+		const { ui, footer } = fakeUI();
+		const sc = new StatusController();
+		sc.attach(ui, "dense");
+		sc.setGauges(gauges);
+		sc.setDisplayMode("dense");
+		expect(footer()).toBe("om");
+	});
+});
+
 describe("fmtTokens", () => {
 	it("formats below and above 1k and 100k", () => {
 		expect(fmtTokens(848)).toBe("848");

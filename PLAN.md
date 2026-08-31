@@ -463,7 +463,8 @@ Namespace `observational-memory` under `~/.pi/agent/settings.json` and project
 `displayMode` selects the TUI surface: `bar` = gauges in the footer + transient worker widgets
 (default); `dense` = permanent two-line widget (gauges with numeric readouts + detail line with
 obs/topics/journey/consolidator/cost/error), footer reduced to a bare `om` label; `off` = no
-footer, no widget. Invalid values fall back to `bar`. Reported by `/om:status`.
+footer, no widget. Invalid values fall back to `bar`. Reported by `/om:status`; switchable live
+per session via `/om display bar|dense|off` (session-scoped override, no file edit/reload).
 
 `PI_OM_PASSIVE` env may force `passive` (disables all triggers) for clean `/tree` testing.
 

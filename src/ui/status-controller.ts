@@ -150,6 +150,27 @@ export class StatusController {
 		this.renderSurfaces();
 	}
 
+	/**
+	 * Switch display mode live (via `/om display`) without re-attaching: "off" tears down
+	 * footer + widget; switching to bar/dense re-renders whatever the new mode owns and
+	 * resumes the spinner if a worker is running. A no-op when the mode is unchanged.
+	 */
+	setDisplayMode(mode: DisplayMode): void {
+		if (mode === this.displayMode) return;
+		this.displayMode = mode;
+		if (mode === "off") {
+			this.stopSpinner();
+			this.ui?.setWidget(DENSE_WIDGET_KEY, undefined);
+			this.ui?.setWidget(WORKERS_WIDGET_KEY, undefined);
+			this.ui?.setStatus(FOOTER_KEY, undefined);
+			return;
+		}
+		if (!this.ui) return;
+		this.ui.setStatus(FOOTER_KEY, this.renderFooter());
+		this.renderWidget();
+		if (this.hasRunningWorker()) this.startSpinner();
+	}
+
 	workerStart(type: WorkerType, runId: string): void {
 		if (!this.ui) return;
 		const existing = this.workers.get(runId);

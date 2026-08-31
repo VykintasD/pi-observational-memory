@@ -152,7 +152,13 @@ indicators stack as transient widgets above it. `dense` keeps the footer as a ba
 and renders a permanent two-line widget instead — line 1 carries the three gauges with numeric
 `value/max` readouts (plus worker indicators), line 2 a detail line (active obs, topics, journey
 size vs target, consolidator state, session cost, last worker error). `off` renders no footer
-and no widget. The mode can live in a named profile; it is reported by `/om:status`.
+and no widget. The mode can live in a named profile and is reported by `/om:status`.
+
+Switch it live with **`/om display bar|dense|off`** — applies to the current session only,
+no file edit, no reload (`/om display` with no argument shows the active mode; `/om:status`
+flags an override against the configured value). Note the footer is a single-line surface, so
+the two-line dense mode necessarily renders as a widget above the input rather than in the
+status line itself.
 
 ## Development
 
