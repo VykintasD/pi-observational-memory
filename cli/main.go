@@ -65,12 +65,32 @@ func dbPath(args []string) string {
 	return filepath.Join(home, ".pi", "agent", "om", "om.db")
 }
 
+// dsnEscapePath percent-encodes the characters that change DSN structure: '?' and '#' would
+// otherwise delimit the query/fragment, and '%' would start an escape sequence. The DSN is
+// parsed as a URI (first '?' starts the query), so without this a DB path containing '?' is
+// silently truncated and data lands in the wrong file. SQLite's URI parser decodes the
+// escapes back, so the real file path is preserved.
+func dsnEscapePath(p string) string {
+	var b strings.Builder
+	b.Grow(len(p))
+	for i := 0; i < len(p); i++ {
+		switch c := p[i]; c {
+		case '?', '#', '%':
+			fmt.Fprintf(&b, "%%%02X", c)
+		default:
+			b.WriteByte(c)
+		}
+	}
+	return b.String()
+}
+
 func openDB(path string, readOnly bool) *sql.DB {
 	var dsn string
+	esc := dsnEscapePath(path)
 	if readOnly {
-		dsn = "file:" + path + "?mode=ro&_pragma=busy_timeout(5000)"
+		dsn = "file:" + esc + "?mode=ro&_pragma=busy_timeout(5000)"
 	} else {
-		dsn = "file:" + path + "?_pragma=busy_timeout(5000)&_pragma=synchronous(NORMAL)"
+		dsn = "file:" + esc + "?_pragma=busy_timeout(5000)&_pragma=synchronous(NORMAL)"
 	}
 	db, err := sql.Open("sqlite", dsn)
 	if err != nil {
