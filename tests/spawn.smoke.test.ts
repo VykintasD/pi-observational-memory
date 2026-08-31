@@ -4,7 +4,7 @@ import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import { AGENT_EXTENSION_PATH, buildWorkerArgv, buildWorkerEnv, modelArg } from "../src/spawn/launch.js";
-import { readObserverResult, runResultPath, runsDir, writeObserverResult } from "../src/spawn/runs.js";
+import { readObserverResult, runResultPath, writeObserverResult } from "../src/spawn/runs.js";
 import { registerObserverTool } from "../agent/observer/tool.js";
 
 describe("launch argv + env", () => {
@@ -34,19 +34,19 @@ describe("launch argv + env", () => {
 		expect(modelArg(model)).toBe("anthropic/claude-sonnet-4-6");
 	});
 
-	it("sets the worker IPC env vars", () => {
-		const memoryRoot = "/proj/.memory/sess-1";
-		const env = buildWorkerEnv("observer", { memoryRoot, runId: "r1" });
+	it("sets the worker IPC env vars against the global runs root", () => {
+		const runsRoot = "/home/v/.pi/agent/om/runs";
+		const env = buildWorkerEnv("observer", { runsRoot, runId: "r1" });
 		expect(env.OM_WORKER).toBe("observer");
 		expect(env.OM_RUN_ID).toBe("r1");
 		// Chunk travels as the `pi -p` prompt (recorded user message), not via env/file.
 		expect(env.OM_CHUNK_PATH).toBeUndefined();
-		expect(env.OM_RESULT_PATH).toBe(runResultPath(memoryRoot, "r1"));
-		expect(env.OM_MEMORY_DIR).toBe(memoryRoot);
+		expect(env.OM_RESULT_PATH).toBe(runResultPath(runsRoot, "r1"));
+		expect(env.OM_MEMORY_DIR).toBeUndefined();
 	});
 
-	it("resolves run paths under the session memory root's .runs", () => {
-		expect(runsDir("/proj/.memory/sess-1")).toBe("/proj/.memory/sess-1/.runs");
+	it("resolves run paths directly under the global runs root", () => {
+		expect(runResultPath("/home/v/.pi/agent/om/runs", "r1")).toBe("/home/v/.pi/agent/om/runs/r1.result.json");
 	});
 });
 

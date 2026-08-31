@@ -1,146 +1,86 @@
-/**
- * `.memory/` substrate (Phase B). The filesystem IS the long-term recall interface: the master
- * reads topic files with ordinary `ls`/`read`/`grep`. Topic files are NOT rolled back by `/tree`
- * (they track the repo, not the session branch).
- *
- * Layout under <project>/.memory/:
- *   INDEX.md            — orchestrator-owned; (re)rendered from topic front-matter
- *   <topic>.md          — consolidator-authored; YAML front-matter + current-state prose
- *   .runs/<id>.json     — transient worker IPC (not GC'd in v1)
- *
- * All writes are atomic (temp + rename) so a reader never sees a half-written file.
- */
-import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, writeFileSync } from "node:fs";
-import { dirname, join, relative, resolve } from "node:path";
+import { omRun, OmError } from "./om-cli.js";
 
-export const INDEX_FILENAME = "INDEX.md";
-/**
- * The running, whole-project descriptive history. Consolidator-authored prose (no front-matter),
- * pushed into every compaction block for orientation. Like INDEX.md it is a special file, NOT a
- * topic file: it is excluded from `listTopics`/the memory map and read verbatim at compaction.
- */
-export const JOURNEY_FILENAME = "JOURNEY.md";
-
-/** The project-level `.memory/` base. Per-session roots live one level below it. */
-export function memoryBaseDir(cwd: string): string {
-	return join(cwd, ".memory");
+/** A topic row as listed by `om topics list` (JSON). */
+export interface Topic {
+	slug: string;
+	title: string;
+	summary: string;
+	updated: string;
 }
 
 /**
- * The per-session memory root: `.memory/<sessionId>/`. All durable long-term memory (INDEX,
- * topic files, JOURNEY) and transient `.runs/` IPC are scoped under here so two sessions in the
- * same project never share consolidator output. Keyed by the immutable session header id
- * (survives /name, /resume, /tree) — NOT the session filename or display name.
+ * Durable-tier accessors, backed by the om CLI (global SQLite, one row per session id).
+ * The CLI resolves the database from OM_DB > ~/.pi/agent/om/om.db, so accessors are keyed
+ * by sessionId alone. Exit-code conventions from the CLI: 1 = usage or search no-match
+ * (normal "empty" result), 2 = db error, 3 = not found.
  */
-export function sessionMemoryRoot(cwd: string, sessionId: string): string {
-	return join(memoryBaseDir(cwd), sessionId);
+
+function emptyToUndefined(s: string): string | undefined {
+	const t = s.trim();
+	return t.length > 0 ? t : undefined;
 }
 
-export function indexPath(root: string): string {
-	return join(root, INDEX_FILENAME);
+/** The session's JOURNEY body; undefined when absent or empty. */
+export async function journeyGet(sessionId: string): Promise<string | undefined> {
+	const out = await omRun(["journey", "get", sessionId]);
+	return emptyToUndefined(out);
 }
 
-export function journeyPath(root: string): string {
-	return join(root, JOURNEY_FILENAME);
+/** Replace the session's JOURNEY body; an empty string clears it. */
+export async function journeySet(sessionId: string, body: string): Promise<void> {
+	await omRun(["journey", "set", sessionId], body);
 }
 
-/** Read `.memory/JOURNEY.md` body, trimmed. Returns undefined when missing or effectively empty. */
-export function readJourney(root: string): string | undefined {
-	const path = journeyPath(root);
-	if (!existsSync(path)) return undefined;
+/** All topics of the session, sorted by slug. */
+export async function topicList(sessionId: string): Promise<Topic[]> {
+	const out = (await omRun(["topics", "list", sessionId])).trim();
+	if (!out) return [];
+	return JSON.parse(out) as Topic[];
+}
+
+/** The topic body (frontmatter excluded); undefined when the slug does not exist. */
+export async function topicGet(sessionId: string, slug: string): Promise<string | undefined> {
 	try {
-		const body = readFileSync(path, "utf-8").trim();
-		return body.length > 0 ? body : undefined;
-	} catch {
-		return undefined;
+		const out = await omRun(["topic", "get", sessionId, slug]);
+		return emptyToUndefined(out);
+	} catch (e) {
+		if (e instanceof OmError && e.code === 3) return undefined;
+		throw e;
 	}
 }
 
-/** Atomic write (temp + rename). Creates parent dirs as needed. */
-export function atomicWrite(path: string, content: string): void {
-	mkdirSync(dirname(path), { recursive: true });
-	const tmp = `${path}.tmp-${process.pid}-${Date.now()}`;
-	writeFileSync(tmp, content, "utf-8");
-	renameSync(tmp, path);
+/** Create or update a topic by slug (title/summary in the index, body via stdin). */
+export async function topicPut(sessionId: string, slug: string, title: string, summary: string, body: string): Promise<void> {
+	await omRun(["topic", "put", sessionId, slug, "--title", title, "--summary", summary], body);
+}
+
+/** Delete a topic; no-op when the slug does not exist. */
+export async function topicDelete(sessionId: string, slug: string): Promise<void> {
+	await omRun(["topic", "del", sessionId, slug]);
 }
 
 /**
- * Resolve a (possibly relative) path and confirm it stays inside `.memory/`. Returns the
- * absolute path, or undefined if it escapes the sandbox. The consolidator's scoped tools use
- * this to reject any path outside `.memory/` (design risk 6).
+ * Regex search (Go regexp) across topic titles, summaries, and bodies.
+ * Returns lines of `slug<TAB>matching line` (capped at 200); "" when there are no matches.
  */
-export function resolveWithinMemory(root: string, requestedPath: string): string | undefined {
-	const base = resolve(root);
-	const abs = resolve(base, requestedPath);
-	const rel = relative(base, abs);
-	if (rel === "" || rel === ".") return abs; // the session memory root itself
-	if (rel.startsWith("..") || resolve(base, rel) !== abs) return undefined;
-	return abs;
-}
-
-export type TopicFrontMatter = {
-	id?: string;
-	title?: string;
-	summary?: string;
-	updated?: string;
-};
-
-export type Topic = TopicFrontMatter & {
-	/** Path relative to the project root, e.g. ".memory/auth.md". */
-	path: string;
-	/** Bare filename, e.g. "auth.md". */
-	filename: string;
-};
-
-const FRONT_MATTER_RE = /^---\n([\s\S]*?)\n---\n?/;
-
-/**
- * Parse leading YAML-ish front-matter. Intentionally tiny (no YAML dep): supports the flat
- * `key: value` fields the consolidator authors (id, title, summary, updated). Returns the
- * parsed fields plus the body after the front-matter block.
- */
-export function parseFrontMatter(content: string): { front: TopicFrontMatter; body: string } {
-	const match = FRONT_MATTER_RE.exec(content);
-	if (!match) return { front: {}, body: content };
-	const front: TopicFrontMatter = {};
-	for (const line of match[1].split("\n")) {
-		const idx = line.indexOf(":");
-		if (idx < 0) continue;
-		const key = line.slice(0, idx).trim();
-		let value = line.slice(idx + 1).trim();
-		if (
-			(value.startsWith('"') && value.endsWith('"')) ||
-			(value.startsWith("'") && value.endsWith("'"))
-		) {
-			value = value.slice(1, -1);
-		}
-		if (key === "id" || key === "title" || key === "summary" || key === "updated") {
-			front[key] = value;
-		}
+export async function topicSearch(sessionId: string, pattern: string): Promise<string> {
+	try {
+		return await omRun(["topic", "search", sessionId, pattern]);
+	} catch (e) {
+		if (e instanceof OmError && e.code === 1) return "";
+		throw e;
 	}
-	return { front, body: content.slice(match[0].length) };
 }
 
 /**
- * List parsed topic files (every `*.md` except INDEX.md/JOURNEY.md) under a session memory
- * root, sorted by filename. Each topic's `path` is rendered relative to the project cwd (e.g.
- * `.memory/<sessionId>/auth.md`) so the master can `read`/`grep` it directly from the map.
+ * Copy-on-fork: copy the parent session's rows into the child session.
+ * No-op when the child already has any rows (forking is a one-time event).
  */
-export function listTopics(root: string): Topic[] {
-	if (!existsSync(root)) return [];
-	const cwd = resolve(root, "..", "..");
-	const topics: Topic[] = [];
-	for (const filename of readdirSync(root)) {
-		if (!filename.endsWith(".md") || filename === INDEX_FILENAME || filename === JOURNEY_FILENAME) continue;
-		let content: string;
-		try {
-			content = readFileSync(join(root, filename), "utf-8");
-		} catch {
-			continue;
-		}
-		const { front } = parseFrontMatter(content);
-		topics.push({ ...front, path: relative(cwd, join(root, filename)), filename });
-	}
-	topics.sort((a, b) => (a.filename < b.filename ? -1 : a.filename > b.filename ? 1 : 0));
-	return topics;
+export async function forkCopy(fromSessionId: string, toSessionId: string): Promise<void> {
+	await omRun(["fork-copy", fromSessionId, toSessionId]);
+}
+
+/** One-time migration of a legacy .memory/<session>/ directory into the database. */
+export async function legacyImport(sessionId: string, legacyDir: string): Promise<void> {
+	await omRun(["import", sessionId, legacyDir]);
 }

@@ -64,11 +64,10 @@ export function buildWorkerArgv(opts: {
 export type WorkerExit = { code: number | null; signal: NodeJS.Signals | null; stderr: string };
 
 /**
- * Spawn a headless worker; resolve when it exits. Workers run in their master session's
- * `.memory/<sessionId>/` root (not the project cwd) so pi keys the run into a distinct global
+ * Spawn a headless worker; resolve when it exits. Workers run in the global runs root
+ * (~/.pi/agent/om/runs), NOT the project cwd, so pi keys the run into a distinct global
  * session bucket and it never clutters the project's `/resume` picker. The root is ensured to
- * exist before spawn — `spawn()` would ENOENT otherwise (the memory root is created lazily on
- * first durable write when there is no parent to seed).
+ * exist before spawn — `spawn()` would ENOENT otherwise.
  */
 export function spawnWorker(opts: {
 	argv: string[];
@@ -104,26 +103,30 @@ export function spawnWorker(opts: {
 	});
 }
 
-export type ObserverLaunchEnv = {
-	/** Absolute `.memory/<sessionId>/` root — IPC files and the consolidator sandbox live here. */
-	memoryRoot: string;
+export type WorkerLaunchEnv = {
+	/** Global runs root (~/.pi/agent/om/runs) — IPC result/cost files live here. */
+	runsRoot: string;
 	runId: string;
+	/** Session key for the consolidator's om-CLI memory tools; ignored by the observer. */
+	sessionId?: string;
 };
 
 /**
  * Build the env a worker subprocess needs to write its result file. The chunk itself is NOT
  * passed via env/file — it is the `pi -p` prompt (recorded user message) so the run stays
- * faithfully inspectable on resume.
+ * faithfully inspectable on resume. The om CLI resolves the database path itself
+ * (OM_DB env > ~/.pi/agent/om/om.db), so no DB path is passed here.
  */
-export function buildWorkerEnv(role: "observer" | "consolidator", opts: ObserverLaunchEnv): NodeJS.ProcessEnv {
+export function buildWorkerEnv(role: "observer" | "consolidator", opts: WorkerLaunchEnv): NodeJS.ProcessEnv {
 	return {
 		...process.env,
 		OM_WORKER: role,
 		OM_RUN_ID: opts.runId,
-		OM_RESULT_PATH: runResultPath(opts.memoryRoot, opts.runId),
+		OM_RESULT_PATH: runResultPath(opts.runsRoot, opts.runId),
 		// Per-run cost handoff: the worker extension writes pi's built-in usage.cost.total here.
-		OM_COST_PATH: runCostPath(opts.memoryRoot, opts.runId),
-		// Sandbox root for the consolidator's scoped file tools (design risk 6).
-		OM_MEMORY_DIR: opts.memoryRoot,
+		OM_COST_PATH: runCostPath(opts.runsRoot, opts.runId),
+		// Session key for the consolidator's memory tools (the durable store is addressed by
+		// session id, not by a directory).
+		...(role === "consolidator" ? { OM_SESSION_ID: opts.sessionId ?? "" } : {}),
 	};
 }

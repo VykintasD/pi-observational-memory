@@ -1,8 +1,8 @@
 /**
  * Phase B consolidator clock. When the active observation pool crosses
  * `consolidateAtPoolTokens`, promote the oldest observations (above `poolTargetTokens`) into
- * durable `.memory/` topic files via a subprocess consolidator, then tombstone exactly the
- * timestamps it reports back.
+ * the durable topic store (global SQLite via the om CLI) via a subprocess consolidator, then
+ * tombstone exactly the timestamps it reports back.
  *
  * Runs in the BACKGROUND, mirroring the observer trigger (turn_end / agent_start), strictly
  * one at a time (design risk 4). Compaction does not wait for it (R5).
@@ -28,8 +28,7 @@ import {
 	type Observation,
 } from "../ledger/index.js";
 import { nowTimestamp } from "../ledger/serialize.js";
-import { renderIndexFile } from "../memory/index-render.js";
-import { atomicWrite, indexPath, listTopics, readJourney } from "../memory/paths.js";
+import { journeyGet, topicList } from "../memory/paths.js";
 import type { Runtime } from "../runtime.js";
 import { buildWorkerArgv, buildWorkerEnv, spawnWorker } from "../spawn/launch.js";
 import { recordWorkerCost } from "./observer-trigger.js";
@@ -50,30 +49,31 @@ function nextRunId(): string {
 }
 
 /**
- * Build the consolidator's `-p` prompt: current time + current index + current journey + the
- * overflow lines. The journey is included verbatim so the consolidator updates it in place
+ * Build the consolidator's `-p` prompt: current time + current topic index + current journey +
+ * the overflow lines. The journey is included verbatim so the consolidator updates it in place
  * (append a segment for this batch; compress the old tail only if over `journeyTargetTokens`).
  */
-function buildConsolidatorPrompt(memoryRoot: string, promote: Observation[], journeyTargetTokens: number): string {
-	const indexText = renderIndexFile(listTopics(memoryRoot));
-	const journeyText = readJourney(memoryRoot);
+async function buildConsolidatorPrompt(sessionId: string, promote: Observation[], journeyTargetTokens: number): Promise<string> {
+	const topics = await topicList(sessionId);
+	const indexText = topics.length === 0 ? "(no topics yet)" : topics.map((t) => `- ${t.slug}: ${t.summary}`).join("\n");
+	const journeyText = await journeyGet(sessionId);
 	const journeyWords = Math.round((journeyTargetTokens * 3) / 4);
 	const obsLines = sortObservations(promote).map(observationToLine).join("\n");
 	return (
 		`Current local time: ${nowTimestamp()}\n\n` +
-		"You are folding the observations below into the durable topic files under .memory/. " +
-		"Use this exact time string in the `updated` front-matter of any file you write, and in any new JOURNEY.md entry.\n\n" +
-		"===== CURRENT MEMORY INDEX (generated; do not edit INDEX.md) =====\n" +
+		"You are folding the observations below into this session's durable topic store. " +
+		"Address topics by slug with your memory tools (see your instructions); create, merge, or rewrite as needed.\n\n" +
+		"===== CURRENT TOPIC INDEX (generated) =====\n" +
 		`${indexText}\n` +
-		"===== END MEMORY INDEX =====\n\n" +
-		"===== CURRENT JOURNEY (.memory/JOURNEY.md — the running descriptive project history) =====\n" +
+		"===== END TOPIC INDEX =====\n\n" +
+		"===== CURRENT JOURNEY (the running descriptive project history) =====\n" +
 		`${journeyText ?? "(empty — no journey yet; start one)"}\n` +
 		"===== END JOURNEY =====\n\n" +
 		"===== OBSERVATIONS TO CONSOLIDATE (each line is `<timestamp-id>  <content>`) =====\n" +
 		`${obsLines}\n` +
 		"===== END OBSERVATIONS =====\n\n" +
-		"Fold every observation above into topic files (create/merge/rewrite as needed). Then update " +
-		`.memory/JOURNEY.md per your instructions — keep it under ~${journeyTargetTokens} tokens (~${journeyWords} words), ` +
+		"Fold every observation above into topics (create/merge/rewrite as needed). Then update " +
+		`the journey per your instructions — keep it under ~${journeyTargetTokens} tokens (~${journeyWords} words), ` +
 		"purely descriptive, no advice or next steps. Finish with a one-sentence confirmation."
 	);
 }
@@ -110,14 +110,14 @@ async function dispatchConsolidator(
 	runtime.status.workerStart("consolidator", runId);
 
 	try {
-		const prompt = buildConsolidatorPrompt(runtime.memoryRoot, promote, runtime.config.journeyTargetTokens);
+		const prompt = await buildConsolidatorPrompt(runtime.sessionId, promote, runtime.config.journeyTargetTokens);
 		const argv = buildWorkerArgv({
 			model: runtime.config.models.consolidator,
 			sessionName: `om-consolidator-${runId}`,
 			kickoffPrompt: prompt,
 		});
-		const env = buildWorkerEnv("consolidator", { memoryRoot: runtime.memoryRoot, runId });
-		const exit = await spawnWorker({ argv, cwd: runtime.memoryRoot, env, signal: controller.signal });
+		const env = buildWorkerEnv("consolidator", { runsRoot: runtime.runsRoot, runId });
+		const exit = await spawnWorker({ argv, cwd: runtime.runsRoot, env, signal: controller.signal });
 		// Capture cost before the exit-code check so a partial run's spend is still recorded.
 		recordWorkerCost(pi, runtime, ctx, "consolidator", runId);
 		if (exit.code !== 0) {
@@ -137,9 +137,6 @@ async function dispatchConsolidator(
 				pi.appendEntry(OM_OBSERVATIONS_DROPPED, { observationTimestamps: toDrop, coversUpToId });
 			}
 		}
-
-		// Re-render INDEX.md so live ls/grep truth leads the pushed map (design risk 3).
-		atomicWrite(indexPath(runtime.memoryRoot), renderIndexFile(listTopics(runtime.memoryRoot)));
 
 		runtime.status.workerDone(runId, toDrop.length);
 		runtime.refreshFooterGauges(ctx.sessionManager.getBranch(), ctx.getContextUsage?.()?.tokens ?? null);

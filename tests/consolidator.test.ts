@@ -1,75 +1,97 @@
-import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import { registerConsolidatorTools } from "../agent/consolidator/tools.js";
 import { buildWorkerEnv } from "../src/spawn/launch.js";
+import { ensureOmDb } from "../src/memory/db.js";
 
 describe("buildWorkerEnv(consolidator)", () => {
-	it("sets role, run id, and the .memory sandbox root", () => {
-		const env = buildWorkerEnv("consolidator", { memoryRoot: "/proj/.memory/sess-1", runId: "c1" });
+	it("sets role, run id, IPC paths, and the session key (no directory sandbox)", () => {
+		const env = buildWorkerEnv("consolidator", {
+			runsRoot: "/home/v/.pi/agent/om/runs",
+			runId: "c1",
+			sessionId: "sess-1",
+		});
 		expect(env.OM_WORKER).toBe("consolidator");
 		expect(env.OM_RUN_ID).toBe("c1");
-		expect(env.OM_MEMORY_DIR).toBe("/proj/.memory/sess-1");
+		expect(env.OM_SESSION_ID).toBe("sess-1");
+		expect(env.OM_RESULT_PATH).toBe("/home/v/.pi/agent/om/runs/c1.result.json");
+		expect(env.OM_MEMORY_DIR).toBeUndefined();
+	});
+
+	it("the observer env carries no session key", () => {
+		const env = buildWorkerEnv("observer", { runsRoot: "/runs", runId: "r1" });
+		expect(env.OM_WORKER).toBe("observer");
+		expect(env.OM_SESSION_ID).toBeUndefined();
+		expect(env.OM_MEMORY_DIR).toBeUndefined();
 	});
 });
 
-describe("registerConsolidatorTools (scoped to .memory/)", () => {
-	let cwd: string;
-	let memoryRoot: string;
+describe("registerConsolidatorTools (slug-addressed om-store shims)", () => {
+	let tmp: string;
 	let tools: Map<string, any>;
 
-	beforeEach(() => {
-		cwd = mkdtempSync(join(tmpdir(), "om-cons-tools-"));
-		memoryRoot = join(cwd, ".memory");
+	beforeEach(async () => {
+		tmp = mkdtempSync(join(tmpdir(), "om-cons-tools-"));
+		process.env.OM_DB = join(tmp, "om.db");
+		await ensureOmDb();
 		tools = new Map();
 		const fakePi = { registerTool: (def: any) => tools.set(def.name, def) } as any;
-		registerConsolidatorTools(fakePi, memoryRoot);
+		registerConsolidatorTools(fakePi, "sess-1");
 	});
 	afterEach(() => {
-		rmSync(cwd, { recursive: true, force: true });
+		delete process.env.OM_DB;
+		rmSync(tmp, { recursive: true, force: true });
 	});
 
-	it("registers the scoped tool belt (no terminal report tool)", () => {
-		expect([...tools.keys()].sort()).toEqual(["edit", "grep", "ls", "read", "write"].sort());
+	const text = (res: { content: { text: string }[] }) => res.content[0].text;
+
+	it("registers the slug-addressed tool belt (no terminal report tool)", () => {
+		expect([...tools.keys()].sort()).toEqual(["edit", "grep", "ls", "read", "write"]);
 	});
 
-	it("write then read a topic file", async () => {
-		const res = await tools.get("write").execute("1", { path: "auth.md", content: "---\nid: auth\n---\nbody" });
-		expect(res.content[0].text).toContain("Wrote auth.md");
-		expect(readFileSync(join(memoryRoot, "auth.md"), "utf-8")).toContain("body");
-		const read = await tools.get("read").execute("2", { path: "auth.md" });
-		expect(read.content[0].text).toContain("body");
+	it("write then read a topic by slug", async () => {
+		const res = await tools.get("write").execute("1", {
+			slug: "auth",
+			title: "Auth",
+			summary: "JWT-based auth",
+			content: "we use JWT tokens",
+		});
+		expect(text(res)).toContain("Wrote topic auth");
+		const read = await tools.get("read").execute("2", { slug: "auth" });
+		expect(text(read)).toBe("we use JWT tokens");
 	});
 
-	it("refuses to write or edit INDEX.md", async () => {
-		const w = await tools.get("write").execute("1", { path: "INDEX.md", content: "x" });
-		expect(w.content[0].text).toContain("generated automatically");
-		expect(existsSync(join(memoryRoot, "INDEX.md"))).toBe(false);
+	it("read of an unknown topic fails cleanly", async () => {
+		const read = await tools.get("read").execute("1", { slug: "nope" });
+		expect(text(read)).toContain("no such topic: nope");
 	});
 
-	it("rejects paths that escape .memory/", async () => {
-		const r = await tools.get("write").execute("1", { path: "../escape.md", content: "x" });
-		expect(r.content[0].text).toContain("escapes .memory/");
-		expect(existsSync(join(cwd, "escape.md"))).toBe(false);
+	it("the reserved JOURNEY slug addresses the journey", async () => {
+		const w = await tools.get("write").execute("1", { slug: "JOURNEY", content: "## 2026-01-01\nStarted." });
+		expect(text(w)).toContain("Wrote journey");
+		const r = await tools.get("read").execute("2", { slug: "JOURNEY" });
+		expect(text(r)).toBe("## 2026-01-01\nStarted.");
 	});
 
 	it("edit replaces an exact unique substring and rejects ambiguous matches", async () => {
-		await tools.get("write").execute("1", { path: "t.md", content: "alpha beta alpha" });
-		const ambiguous = await tools.get("edit").execute("2", { path: "t.md", oldText: "alpha", newText: "X" });
-		expect(ambiguous.content[0].text).toContain("ambiguous");
-		const ok = await tools.get("edit").execute("3", { path: "t.md", oldText: "beta", newText: "BETA" });
-		expect(ok.content[0].text).toContain("Edited");
-		expect(readFileSync(join(memoryRoot, "t.md"), "utf-8")).toBe("alpha BETA alpha");
+		await tools.get("write").execute("1", { slug: "t", title: "T", summary: "s", content: "alpha beta alpha" });
+		const ambiguous = await tools.get("edit").execute("2", { slug: "t", oldText: "alpha", newText: "X" });
+		expect(text(ambiguous)).toContain("ambiguous");
+		const ok = await tools.get("edit").execute("3", { slug: "t", oldText: "beta", newText: "BETA" });
+		expect(text(ok)).toContain("Edited");
+		expect(text(await tools.get("read").execute("4", { slug: "t" }))).toBe("alpha BETA alpha");
 	});
 
-	it("ls and grep operate within .memory/", async () => {
-		await tools.get("write").execute("1", { path: "auth.md", content: "uses JWT tokens" });
-		await tools.get("write").execute("2", { path: "deploy.md", content: "uses fly.io" });
+	it("ls and grep operate over the store", async () => {
+		await tools.get("write").execute("1", { slug: "auth", title: "Auth", summary: "JWT tokens", content: "uses JWT" });
+		await tools.get("write").execute("2", { slug: "deploy", title: "Deploy", summary: "fly.io pipeline", content: "uses fly.io" });
 		const ls = await tools.get("ls").execute("3", {});
-		expect(ls.content[0].text.split("\n").sort()).toEqual(["auth.md", "deploy.md"]);
+		expect(text(ls).split("\n").sort()).toEqual(["auth — Auth (JWT tokens)", "deploy — Deploy (fly.io pipeline)"]);
 		const grep = await tools.get("grep").execute("4", { pattern: "JWT" });
-		expect(grep.content[0].text).toContain("auth.md:1");
+		expect(text(grep)).toContain("auth");
+		expect(text(grep)).toContain("JWT");
 	});
 });

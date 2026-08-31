@@ -1,5 +1,6 @@
 import { type Config, DEFAULTS, loadConfig } from "./config.js";
 import { foldLedger, poolTokens, rawTokensSinceObservationCoverage, sumSessionCost, type Entry } from "./ledger/index.js";
+import { omRunsRoot } from "./memory/db.js";
 import { StatusController } from "./ui/status-controller.js";
 
 /**
@@ -14,11 +15,14 @@ export class Runtime {
 	enabled = false;
 
 	/**
-	 * Absolute `.memory/<sessionId>/` root for this session's durable + transient memory. Set
-	 * whenever the gate is enabled (session_start / `/om on`) via `ensureSessionMemory`; empty
-	 * while disabled. All path helpers (listTopics/indexPath/readJourney/run*Path) take this root.
+	 * pi's session id — the key of this session's durable rows in the global om store. Set
+	 * whenever the gate is enabled (session_start / `/om on`). The om CLI resolves the database
+	 * path itself (OM_DB env > ~/.pi/agent/om/om.db).
 	 */
-	memoryRoot = "";
+	sessionId = "";
+
+	/** Global transient IPC root for worker run files: ~/.pi/agent/om/runs. */
+	readonly runsRoot = omRunsRoot();
 
 	/**
 	 * In-flight observer subprocesses, keyed by runId. `coversUpToId` is the source-entry id at

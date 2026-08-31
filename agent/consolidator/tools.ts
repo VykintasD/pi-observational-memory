@@ -1,19 +1,24 @@
 /**
  * The consolidator's tool belt. `--no-builtin-tools` is set on the worker, so this extension
- * registers its own read/write/edit/ls/grep — all path-scoped to `.memory/` (design risk 6).
- * There is no result file: the file edits ARE the output, and the run ends by natural exit
+ * registers its own read/write/edit/ls/grep — all slug-addressed shims over the om CLI. The
+ * durable store is global SQLite keyed by the worker's session id (OM_SESSION_ID); there is no
+ * directory sandbox — the CLI itself only touches THIS session's rows, so a wayward model
+ * cannot read or clobber the user's project or any other session.
+ *
+ * There is no result file: the store edits ARE the output, and the run ends by natural exit
  * of `pi -p` once the model emits its closing confirmation. The orchestrator then tombstones
  * the whole provided batch (it already knows exactly what it handed over).
  *
- * Scoping: every path argument is resolved against OM_MEMORY_DIR and rejected if it escapes
- * that directory, so a wayward model cannot read or clobber the user's project.
+ * "JOURNEY" is a reserved slug: read/write/edit on it address the session's journey instead of
+ * a topic.
  */
-import { existsSync, readFileSync, readdirSync, statSync } from "node:fs";
-import { join, relative, resolve } from "node:path";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 import type { Static } from "typebox";
-import { atomicWrite } from "../../src/memory/paths.js";
+import { OmError } from "../../src/memory/om-cli.js";
+import { journeyGet, journeySet, topicGet, topicList, topicPut, topicSearch } from "../../src/memory/paths.js";
+
+const JOURNEY_SLUG = "JOURNEY";
 
 type ToolText = { content: { type: "text"; text: string }[]; details: unknown };
 
@@ -25,142 +30,145 @@ function fail(text: string): ToolText {
 	return { content: [{ type: "text" as const, text: `Error: ${text}` }], details: { error: true } };
 }
 
-/** Resolve a requested path against the sandbox root, or return undefined if it escapes. */
-function scoped(root: string, requested: string): string | undefined {
-	const abs = resolve(root, requested);
-	const rel = relative(root, abs);
-	if (rel === "") return abs;
-	if (rel.startsWith("..")) return undefined;
-	return abs;
+class ToolFailure extends Error {}
+
+/** Run an async store operation, mapping om CLI errors to tool failure text. */
+async function guarded<T>(op: () => Promise<T>): Promise<T> {
+	try {
+		return await op();
+	} catch (e) {
+		if (e instanceof OmError) throw new ToolFailure(e.message);
+		throw e;
+	}
 }
 
+const LsSchema = Type.Object({});
+const GrepSchema = Type.Object({
+	pattern: Type.String({ description: "Regular expression (Go RE2 syntax; prefer simple literal or word patterns)." }),
+});
 const ReadSchema = Type.Object({
-	path: Type.String({ description: "Path inside .memory/, e.g. 'auth.md' or '.memory/auth.md'." }),
+	slug: Type.String({ description: `Slug of the topic to read, or "${JOURNEY_SLUG}" for the journey.` }),
 });
 const WriteSchema = Type.Object({
-	path: Type.String({ description: "Path inside .memory/ to (over)write, e.g. 'auth.md'." }),
-	content: Type.String({ description: "Full file content, including YAML front-matter." }),
+	slug: Type.String({ description: `Slug of the topic to create/update, or "${JOURNEY_SLUG}" to rewrite the journey.` }),
+	title: Type.Optional(Type.String({ description: "Short human title (topics only; defaults to the slug)." })),
+	summary: Type.Optional(Type.String({ description: "One line, <= 140 chars — what this topic covers (topics only)." })),
+	content: Type.String({ description: "Full body text (replaces the current body)." }),
 });
 const EditSchema = Type.Object({
-	path: Type.String({ description: "Path inside .memory/ to edit." }),
+	slug: Type.String({ description: `Slug of the topic to edit, or "${JOURNEY_SLUG}" for the journey.` }),
 	oldText: Type.String({ description: "Exact text to replace (must occur exactly once)." }),
 	newText: Type.String({ description: "Replacement text." }),
 });
-const LsSchema = Type.Object({
-	path: Type.Optional(Type.String({ description: "Subdirectory inside .memory/. Defaults to .memory/ root." })),
-});
-const GrepSchema = Type.Object({
-	pattern: Type.String({ description: "JavaScript regular expression to search for." }),
-	path: Type.Optional(Type.String({ description: "Restrict to this file/subdir inside .memory/." })),
-});
 
+type LsInput = Static<typeof LsSchema>;
+type GrepInput = Static<typeof GrepSchema>;
 type ReadInput = Static<typeof ReadSchema>;
 type WriteInput = Static<typeof WriteSchema>;
 type EditInput = Static<typeof EditSchema>;
-type LsInput = Static<typeof LsSchema>;
-type GrepInput = Static<typeof GrepSchema>;
 
-function listFilesRecursive(dir: string): string[] {
-	const out: string[] = [];
-	for (const name of readdirSync(dir)) {
-		if (name.startsWith(".")) continue; // skip .runs and temp files
-		const full = join(dir, name);
-		if (statSync(full).isDirectory()) out.push(...listFilesRecursive(full));
-		else out.push(full);
-	}
-	return out;
+async function readBody(sessionId: string, slug: string): Promise<string | undefined> {
+	if (slug === JOURNEY_SLUG) return journeyGet(sessionId);
+	return topicGet(sessionId, slug);
 }
 
-/** Register the consolidator's scoped file tools (read/write/edit/ls/grep), all under .memory/. */
-export function registerConsolidatorTools(pi: ExtensionAPI, memoryRoot: string): void {
-	const root = resolve(memoryRoot);
+async function writeBody(sessionId: string, slug: string, content: string, title?: string, summary?: string): Promise<void> {
+	if (slug === JOURNEY_SLUG) {
+		await journeySet(sessionId, content);
+		return;
+	}
+	await topicPut(sessionId, slug, title ?? slug, summary ?? "", content);
+}
 
-	pi.registerTool({
-		name: "read",
-		label: "Read memory file",
-		description: "Read a topic file under .memory/.",
-		parameters: ReadSchema,
-		async execute(_id: string, params: ReadInput): Promise<ToolText> {
-			const abs = scoped(root, params.path);
-			if (!abs) return fail("path escapes .memory/");
-			if (!existsSync(abs)) return fail(`no such file: ${params.path}`);
-			return ok(readFileSync(abs, "utf-8"));
-		},
-	});
-
-	pi.registerTool({
-		name: "write",
-		label: "Write memory file",
-		description: "Create or overwrite a topic file under .memory/ (atomic). Do not write INDEX.md.",
-		parameters: WriteSchema,
-		async execute(_id: string, params: WriteInput): Promise<ToolText> {
-			const abs = scoped(root, params.path);
-			if (!abs) return fail("path escapes .memory/");
-			if (/(^|\/)INDEX\.md$/i.test(params.path)) return fail("INDEX.md is generated automatically; do not write it");
-			atomicWrite(abs, params.content);
-			return ok(`Wrote ${params.path} (${params.content.length} bytes).`);
-		},
-	});
-
-	pi.registerTool({
-		name: "edit",
-		label: "Edit memory file",
-		description: "Replace an exact substring in a topic file under .memory/ (atomic).",
-		parameters: EditSchema,
-		async execute(_id: string, params: EditInput): Promise<ToolText> {
-			const abs = scoped(root, params.path);
-			if (!abs) return fail("path escapes .memory/");
-			if (/(^|\/)INDEX\.md$/i.test(params.path)) return fail("INDEX.md is generated automatically; do not edit it");
-			if (!existsSync(abs)) return fail(`no such file: ${params.path}`);
-			const current = readFileSync(abs, "utf-8");
-			const occurrences = current.split(params.oldText).length - 1;
-			if (occurrences === 0) return fail("oldText not found");
-			if (occurrences > 1) return fail(`oldText is ambiguous (${occurrences} matches); add more context`);
-			atomicWrite(abs, current.replace(params.oldText, params.newText));
-			return ok(`Edited ${params.path}.`);
-		},
-	});
-
+/** Register the consolidator's slug-addressed memory tools (ls/grep/read/write/edit). */
+export function registerConsolidatorTools(pi: ExtensionAPI, sessionId: string): void {
 	pi.registerTool({
 		name: "ls",
-		label: "List memory files",
-		description: "List files under .memory/.",
+		label: "List memory topics",
+		description: "List this session's durable topics (slug, title, summary).",
 		parameters: LsSchema,
-		async execute(_id: string, params: LsInput): Promise<ToolText> {
-			const abs = scoped(root, params.path ?? ".");
-			if (!abs) return fail("path escapes .memory/");
-			if (!existsSync(abs)) return ok("(.memory/ is empty)");
-			const entries = readdirSync(abs).filter((n) => !n.startsWith("."));
-			return ok(entries.length > 0 ? entries.sort().join("\n") : "(empty)");
+		async execute(_id: string, _params: LsInput): Promise<ToolText> {
+			try {
+				const topics = await guarded(() => topicList(sessionId));
+				if (topics.length === 0) return ok("(empty)");
+				return ok(topics.map((t) => `${t.slug} — ${t.title} (${t.summary})`).join("\n"));
+			} catch (e) {
+				return fail(e instanceof ToolFailure ? e.message : String(e));
+			}
 		},
 	});
 
 	pi.registerTool({
 		name: "grep",
-		label: "Search memory files",
-		description: "Search topic files under .memory/ with a regular expression.",
+		label: "Search memory topics",
+		description: "Regex-search topic titles/summaries/bodies; returns `slug<TAB>matching line`.",
 		parameters: GrepSchema,
 		async execute(_id: string, params: GrepInput): Promise<ToolText> {
-			let re: RegExp;
 			try {
-				re = new RegExp(params.pattern);
+				const out = await guarded(() => topicSearch(sessionId, params.pattern));
+				return ok(out || "(no matches)");
 			} catch (e) {
-				return fail(`invalid regex: ${(e as Error).message}`);
+				return fail(e instanceof ToolFailure ? e.message : String(e));
 			}
-			const base = scoped(root, params.path ?? ".");
-			if (!base) return fail("path escapes .memory/");
-			if (!existsSync(base)) return ok("(no matches)");
-			const files = statSync(base).isDirectory() ? listFilesRecursive(base) : [base];
-			const hits: string[] = [];
-			for (const file of files) {
-				const lines = readFileSync(file, "utf-8").split("\n");
-				const relPath = relative(root, file);
-				lines.forEach((line, i) => {
-					if (re.test(line)) hits.push(`${relPath}:${i + 1}: ${line.trim()}`);
-				});
-				if (hits.length >= 200) break;
+		},
+	});
+
+	pi.registerTool({
+		name: "read",
+		label: "Read memory topic",
+		description: `Read a topic's body by slug (or "${JOURNEY_SLUG}" for the journey).`,
+		parameters: ReadSchema,
+		async execute(_id: string, params: ReadInput): Promise<ToolText> {
+			try {
+				const body = await guarded(() => readBody(sessionId, params.slug));
+				if (body === undefined) {
+					return fail(params.slug === JOURNEY_SLUG ? "no journey yet" : `no such topic: ${params.slug}`);
+				}
+				return ok(body);
+			} catch (e) {
+				return fail(e instanceof ToolFailure ? e.message : String(e));
 			}
-			return ok(hits.length > 0 ? hits.join("\n") : "(no matches)");
+		},
+	});
+
+	pi.registerTool({
+		name: "write",
+		label: "Write memory topic",
+		description: `Create or fully replace a topic (slug + title + summary + body), or rewrite the journey (slug "${JOURNEY_SLUG}").`,
+		parameters: WriteSchema,
+		async execute(_id: string, params: WriteInput): Promise<ToolText> {
+			try {
+				await guarded(() => writeBody(sessionId, params.slug, params.content, params.title, params.summary));
+				return ok(
+					params.slug === JOURNEY_SLUG
+						? `Wrote journey (${params.content.length} chars).`
+						: `Wrote topic ${params.slug} (${params.content.length} chars).`,
+				);
+			} catch (e) {
+				return fail(e instanceof ToolFailure ? e.message : String(e));
+			}
+		},
+	});
+
+	pi.registerTool({
+		name: "edit",
+		label: "Edit memory topic",
+		description: `Replace an exact substring in a topic's body (or the journey, slug "${JOURNEY_SLUG}").`,
+		parameters: EditSchema,
+		async execute(_id: string, params: EditInput): Promise<ToolText> {
+			try {
+				const current = await guarded(() => readBody(sessionId, params.slug));
+				if (current === undefined) {
+					return fail(params.slug === JOURNEY_SLUG ? "no journey yet" : `no such topic: ${params.slug}`);
+				}
+				const occurrences = current.split(params.oldText).length - 1;
+				if (occurrences === 0) return fail("oldText not found");
+				if (occurrences > 1) return fail(`oldText is ambiguous (${occurrences} matches); add more context`);
+				await guarded(() => writeBody(sessionId, params.slug, current.replace(params.oldText, params.newText)));
+				return ok(`Edited ${params.slug}.`);
+			} catch (e) {
+				return fail(e instanceof ToolFailure ? e.message : String(e));
+			}
 		},
 	});
 }

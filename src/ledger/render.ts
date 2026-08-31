@@ -19,8 +19,9 @@ export function sortObservations(observations: Observation[]): Observation[] {
 
 /**
  * Render the deterministic injection block. Sections, in reading order:
- *   1. Journey — the running descriptive project history (`.memory/JOURNEY.md`, read verbatim).
- *   2. Memory map — durable topic files rendered from front-matter (`.memory/`).
+ *   1. Journey — the running descriptive project history (the session's JOURNEY row in the om
+ *      store, read verbatim).
+ *   2. Memory map — durable topics rendered from the om store's index (slug · title).
  *   3. Observations — the bounded short-term buffer, chronological and verbatim.
  *
  * All three are model-free renders of durable state, regenerated each compaction (never edited

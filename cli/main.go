@@ -156,8 +156,17 @@ func readStdin() string {
 
 func main() {
 	args := os.Args[1:]
+	// Skip global flags before the subcommand, so `om --db <path> init` works as documented.
+	for len(args) > 0 && strings.HasPrefix(args[0], "-") {
+		if args[0] == "--db" && len(args) > 1 {
+			args = args[2:]
+		} else {
+			args = args[1:]
+		}
+	}
 	if len(args) == 0 {
 		usage()
+		return
 	}
 	switch args[0] {
 	case "init":

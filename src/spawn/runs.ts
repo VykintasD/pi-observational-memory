@@ -2,11 +2,12 @@
  * File-based IPC between the in-process orchestrator and subprocess workers.
  *
  * A subprocess cannot append to the master's ledger, so it writes its output to a transient
- * result file under `<project>/.memory/.runs/<runId>.json`. The orchestrator reads + validates
- * it after the process exits, then commits to the right tier (observations → ledger).
+ * result file under the GLOBAL runs root `~/.pi/agent/om/runs/<runId>.json` (never in the
+ * project repo). The orchestrator reads + validates it after the process exits, then commits
+ * to the right tier (observations → ledger).
  *
  * Worker recordings themselves live in pi's GLOBAL session store, not here (decision 11).
- * `.memory/.runs/` clutter is not GC'd in v1 (accepted).
+ * Run-file clutter is not GC'd in v1 (accepted).
  */
 import { mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
@@ -21,12 +22,9 @@ export type ObserverRunResult = {
 	observations: RawObservation[];
 };
 
-export function runsDir(root: string): string {
-	return join(root, ".runs");
-}
-
-export function runResultPath(root: string, runId: string): string {
-	return join(runsDir(root), `${runId}.result.json`);
+/** All run paths take the GLOBAL runs root (~/.pi/agent/om/runs), never a project path. */
+export function runResultPath(runsRoot: string, runId: string): string {
+	return join(runsRoot, `${runId}.result.json`);
 }
 
 /**
@@ -34,8 +32,8 @@ export function runResultPath(root: string, runId: string): string {
  * built-in `usage.cost.total`, read by the orchestrator after the process exits. Uniform
  * across roles — the consolidator has no observations result file but still reports cost here.
  */
-export function runCostPath(root: string, runId: string): string {
-	return join(runsDir(root), `${runId}.cost.json`);
+export function runCostPath(runsRoot: string, runId: string): string {
+	return join(runsRoot, `${runId}.cost.json`);
 }
 
 export type WorkerCostResult = {

@@ -2,8 +2,8 @@
  * Observational memory — ORCHESTRATOR (master-side, in-process).
  *
  * The conductor: owns the clocks/triggers, spawns subprocess workers, commits their output to
- * the ledger (observations) or files (long-term, Phase B), renders compaction, and drives the
- * TUI. Event-driven only — no daemon.
+ * the ledger (observations) or the durable om store (long-term, Phase B), renders compaction,
+ * and drives the TUI. Event-driven only — no daemon.
  *
  * Ships in the global extensions folder during development, so it is gated OFF by default per
  * session (A2a). When the gate is off, every handler returns at its first line and the
@@ -18,6 +18,7 @@ import { registerCompactionTrigger } from "./hooks/compaction-trigger.js";
 import { registerConsolidatorTrigger } from "./hooks/consolidator-trigger.js";
 import { registerObserverTrigger } from "./hooks/observer-trigger.js";
 import { OM_ENABLED, type Entry } from "./ledger/index.js";
+import { ensureOmDb } from "./memory/db.js";
 import { ensureSessionMemory } from "./memory/session.js";
 import { Runtime } from "./runtime.js";
 
@@ -42,12 +43,16 @@ export default function observationalMemory(pi: ExtensionAPI): void {
 		}
 	}
 
-	pi.on("session_start", (_event: unknown, ctx: any) => {
+	pi.on("session_start", async (_event: unknown, ctx: any) => {
 		runtime.ensureConfig(ctx.cwd);
 		runtime.dispatchedCoversUpToId = undefined;
 		const branch = ctx.sessionManager.getBranch() as Entry[];
 		runtime.enabled = readGateFromLedger(branch);
-		if (runtime.enabled) runtime.memoryRoot = ensureSessionMemory(ctx);
+		if (runtime.enabled) {
+			runtime.sessionId = ctx.sessionManager.getSessionId();
+			await ensureOmDb();
+			await ensureSessionMemory(ctx);
+		}
 		attachIfEnabled(ctx);
 		runtime.refreshFooterGauges(branch, ctx.getContextUsage?.()?.tokens ?? null);
 		runtime.refreshCost(ctx.sessionManager.getEntries() as Entry[]);
@@ -70,7 +75,9 @@ export default function observationalMemory(pi: ExtensionAPI): void {
 			runtime.enabled = next;
 			pi.appendEntry(OM_ENABLED, { enabled: next });
 			if (next) {
-				runtime.memoryRoot = ensureSessionMemory(ctx);
+				runtime.sessionId = ctx.sessionManager.getSessionId();
+				await ensureOmDb();
+				await ensureSessionMemory(ctx);
 				attachIfEnabled(ctx);
 				runtime.refreshFooterGauges(ctx.sessionManager.getBranch() as Entry[], ctx.getContextUsage?.()?.tokens ?? null);
 				runtime.refreshCost(ctx.sessionManager.getEntries() as Entry[]);

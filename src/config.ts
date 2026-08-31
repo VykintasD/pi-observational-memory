@@ -23,9 +23,10 @@ export interface Config {
 	/** Verbatim raw tail kept after the cutoff; snaps to a chunk boundary. */
 	tailTokens: number;
 	/**
-	 * Target size of `.memory/JOURNEY.md`, the running descriptive project history the
-	 * consolidator appends to and pushes into every compaction block. When the file grows past
-	 * this, the consolidator compresses its oldest entries (recent history stays detailed).
+	 * Target size of the session's JOURNEY (the running descriptive project history, a row in the
+	 * om store), which the consolidator appends to and which is pushed into every compaction
+	 * block. When it grows past this, the consolidator compresses its oldest entries (recent
+	 * history stays detailed).
 	 */
 	journeyTargetTokens: number;
 	/** Max simultaneous in-flight observer subprocesses. */

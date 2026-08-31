@@ -1,6 +1,6 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { renderMemoryMap } from "../memory/index-render.js";
-import { listTopics, readJourney } from "../memory/paths.js";
+import { journeyGet, topicList } from "../memory/paths.js";
 import type { Runtime } from "../runtime.js";
 import { estimateEntryTokens } from "../tokens.js";
 import {
@@ -193,8 +193,8 @@ export function registerCompactionHook(pi: ExtensionAPI, runtime: Runtime): void
 			// Phase B: render the long-term tier live from disk, regenerated each compaction
 			// (throwaway projections — cannot decay). The journey is the running descriptive history
 			// the consolidator maintains; the map is the topic-file index.
-			const journey = readJourney(runtime.memoryRoot);
-			const map = renderMemoryMap(listTopics(runtime.memoryRoot));
+			const journey = await journeyGet(runtime.sessionId);
+			const map = renderMemoryMap(await topicList(runtime.sessionId));
 			const summary = renderSummary(journey, map, projection.observations);
 
 			return {

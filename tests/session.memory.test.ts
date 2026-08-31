@@ -1,81 +1,73 @@
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
-import { sessionMemoryRoot } from "../src/memory/paths.js";
-import { ensureSessionMemory } from "../src/memory/session.js";
+import { ensureOmDb } from "../src/memory/db.js";
+import { topicGet, topicList, topicPut } from "../src/memory/paths.js";
+import { ensureSessionMemory, parentSessionId, type SessionCtx } from "../src/memory/session.js";
 
-let cwd: string;
+/**
+ * Copy-on-fork seeding: a forked session's durable rows are seeded from its parent once.
+ * The parent is discovered via the header's parentSession lineage; the parent id is the
+ * immutable id in the parent session file's header (first JSONL line), not the filename.
+ */
+describe("copy-on-fork session seeding", () => {
+	let tmp: string;
 
-beforeEach(() => {
-	cwd = mkdtempSync(join(tmpdir(), "om-session-"));
-});
-
-afterEach(() => {
-	rmSync(cwd, { recursive: true, force: true });
-});
-
-/** Minimal session-file header line, as written by pi's SessionManager. */
-function writeSessionFile(id: string): string {
-	const file = join(cwd, `${id}.jsonl`);
-	writeFileSync(file, `${JSON.stringify({ type: "session", id, cwd })}\n`, "utf-8");
-	return file;
-}
-
-function fakeCtx(sessionId: string, header?: { parentSession?: string }) {
-	return {
-		cwd,
-		sessionManager: {
-			getSessionId: () => sessionId,
-			getHeader: () => ({ id: sessionId, cwd, ...header }),
-		},
-	};
-}
-
-describe("ensureSessionMemory", () => {
-	it("returns the per-session root and does not create it without a parent", () => {
-		const root = ensureSessionMemory(fakeCtx("child"));
-		expect(root).toBe(sessionMemoryRoot(cwd, "child"));
-		// Lazy: nothing to seed, so the dir is left for the first durable write to create.
-		expect(existsSync(root)).toBe(false);
+	beforeEach(() => {
+		tmp = mkdtempSync(join(tmpdir(), "om-session-"));
+		process.env.OM_DB = join(tmp, "om.db");
+	});
+	afterEach(() => {
+		delete process.env.OM_DB;
+		rmSync(tmp, { recursive: true, force: true });
 	});
 
-	it("seeds from the parent session on first touch, excluding .runs/", () => {
-		const parentRoot = sessionMemoryRoot(cwd, "parent");
-		mkdirSync(join(parentRoot, ".runs"), { recursive: true });
-		writeFileSync(join(parentRoot, "auth.md"), "---\nid: auth\n---\nbody", "utf-8");
-		writeFileSync(join(parentRoot, "JOURNEY.md"), "## history", "utf-8");
-		writeFileSync(join(parentRoot, ".runs", "obs-1.cost.json"), "{}", "utf-8");
+	/** Write a fake pi session file whose header carries the given id. */
+	function sessionFile(name: string, id: string): string {
+		const file = join(tmp, name);
+		writeFileSync(file, `${JSON.stringify({ type: "header", id })}\n`);
+		return file;
+	}
 
-		const parentFile = writeSessionFile("parent");
-		const root = ensureSessionMemory(fakeCtx("child", { parentSession: parentFile }));
+	function ctx(sessionId: string, parentFile?: string): SessionCtx {
+		return {
+			cwd: tmp,
+			sessionManager: {
+				getSessionId: () => sessionId,
+				getHeader: () => ({ id: sessionId, cwd: tmp, ...(parentFile ? { parentSession: parentFile } : {}) }),
+			},
+		};
+	}
 
-		expect(root).toBe(sessionMemoryRoot(cwd, "child"));
-		expect(readFileSync(join(root, "auth.md"), "utf-8")).toContain("body");
-		expect(readFileSync(join(root, "JOURNEY.md"), "utf-8")).toBe("## history");
-		// Transient IPC is never carried across the fork.
-		expect(existsSync(join(root, ".runs"))).toBe(false);
+	it("parentSessionId reads the parent file's header id, not the filename", () => {
+		const file = sessionFile("2026-08-31T10-00-00Z_wrong-name.jsonl", "parent-uuid-1");
+		expect(parentSessionId(ctx("child", file))).toBe("parent-uuid-1");
 	});
 
-	it("is idempotent: an existing root is never re-seeded from the parent", () => {
-		const parentRoot = sessionMemoryRoot(cwd, "parent");
-		mkdirSync(parentRoot, { recursive: true });
-		writeFileSync(join(parentRoot, "auth.md"), "parent copy", "utf-8");
-		const parentFile = writeSessionFile("parent");
-
-		// Child already has its own divergent memory — seeding must not clobber it.
-		const childRoot = sessionMemoryRoot(cwd, "child");
-		mkdirSync(childRoot, { recursive: true });
-		writeFileSync(join(childRoot, "auth.md"), "child copy", "utf-8");
-
-		const root = ensureSessionMemory(fakeCtx("child", { parentSession: parentFile }));
-		expect(readFileSync(join(root, "auth.md"), "utf-8")).toBe("child copy");
+	it("parentSessionId is undefined without a parent or when the file is gone", () => {
+		expect(parentSessionId(ctx("child"))).toBeUndefined();
+		expect(parentSessionId(ctx("child", join(tmp, "missing.jsonl")))).toBeUndefined();
 	});
 
-	it("skips seeding when the parent kept no memory under this project", () => {
-		const parentFile = writeSessionFile("parent"); // no parent memory root on disk
-		const root = ensureSessionMemory(fakeCtx("child", { parentSession: parentFile }));
-		expect(existsSync(root)).toBe(false);
+	it("does nothing when there is no parent", async () => {
+		await ensureOmDb();
+		await ensureSessionMemory(ctx("child"));
+		expect(await topicList("child")).toEqual([]);
+	});
+
+	it("seeds the child's rows from the parent once", async () => {
+		await ensureOmDb();
+		await topicPut("parent-uuid-1", "auth", "Auth", "s", "body");
+		const parentFile = sessionFile("2026-08-31T10-00-00Z_p.jsonl", "parent-uuid-1");
+
+		await ensureSessionMemory(ctx("child-uuid", parentFile));
+		expect(await topicGet("child-uuid", "auth")).toBe("body");
+
+		// Re-running (resume) never re-seeds: the copy is a one-time event in the database.
+		await topicPut("parent-uuid-1", "auth", "Auth", "s", "changed");
+		await ensureSessionMemory(ctx("child-uuid", parentFile));
+		expect(await topicGet("child-uuid", "auth")).toBe("body");
 	});
 });

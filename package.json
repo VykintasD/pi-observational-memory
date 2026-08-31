@@ -1,7 +1,7 @@
 {
   "name": "observational-memory",
   "version": "0.1.0",
-  "description": "Observational memory for pi — tiered, subprocess-backed memory: parallel observers feed a branch-local ledger buffer; a consolidator (Phase B) promotes the oldest observations into durable .memory/ topic files.",
+  "description": "Observational memory for pi — tiered, subprocess-backed memory: parallel observers feed a branch-local ledger buffer; a consolidator promotes the oldest observations into a global SQLite durable store (om CLI).",
   "type": "module",
   "license": "MIT",
   "pi": {

@@ -1,7 +1,6 @@
 /**
  * Shared worker agent extension (L4), loaded into a subprocess `pi` via `-e`. Branches on
- * the OM_WORKER env var. Phase A implements the `observer` role only; `consolidator` arrives
- * in Phase B.
+ * the OM_WORKER env var (`observer` | `consolidator`).
  *
  * The worker is headless (`pi -p`): builtin tools are disabled (`--no-builtin-tools`), the
  * system prompt is fully replaced with the role prompt, and the role registers only the tools
@@ -44,11 +43,11 @@ export default function omWorker(pi: ExtensionAPI): void {
 	}
 
 	if (role === "consolidator") {
-		const memoryRoot = process.env.OM_MEMORY_DIR;
-		if (!memoryRoot) throw new Error("OM_MEMORY_DIR not set for consolidator worker");
-		// No result file: the consolidator's output is its .memory/ edits, and the orchestrator
+		const sessionId = process.env.OM_SESSION_ID;
+		if (!sessionId) throw new Error("OM_SESSION_ID not set for consolidator worker");
+		// No result file: the consolidator's output is its om-store edits, and the orchestrator
 		// tombstones the whole provided batch on clean exit (it knows what it handed over).
-		registerConsolidatorTools(pi, memoryRoot);
+		registerConsolidatorTools(pi, sessionId);
 
 		pi.on("before_agent_start", async () => {
 			return { systemPrompt: CONSOLIDATOR_SYSTEM };
