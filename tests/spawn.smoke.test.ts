@@ -35,7 +35,7 @@ describe("launch argv + env", () => {
 	});
 
 	it("sets the worker IPC env vars against the global runs root", () => {
-		const runsRoot = "/home/v/.pi/agent/om/runs";
+		const runsRoot = "/tmp/om-runs";
 		const env = buildWorkerEnv("observer", { runsRoot, runId: "r1" });
 		expect(env.OM_WORKER).toBe("observer");
 		expect(env.OM_RUN_ID).toBe("r1");
@@ -46,7 +46,7 @@ describe("launch argv + env", () => {
 	});
 
 	it("resolves run paths directly under the global runs root", () => {
-		expect(runResultPath("/home/v/.pi/agent/om/runs", "r1")).toBe("/home/v/.pi/agent/om/runs/r1.result.json");
+		expect(runResultPath("/tmp/om-runs", "r1")).toBe("/tmp/om-runs/r1.result.json");
 	});
 });
 

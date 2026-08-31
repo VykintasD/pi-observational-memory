@@ -10,14 +10,14 @@ import { ensureOmDb } from "../src/memory/db.js";
 describe("buildWorkerEnv(consolidator)", () => {
 	it("sets role, run id, IPC paths, and the session key (no directory sandbox)", () => {
 		const env = buildWorkerEnv("consolidator", {
-			runsRoot: "/home/v/.pi/agent/om/runs",
+			runsRoot: "/tmp/om-runs",
 			runId: "c1",
 			sessionId: "sess-1",
 		});
 		expect(env.OM_WORKER).toBe("consolidator");
 		expect(env.OM_RUN_ID).toBe("c1");
 		expect(env.OM_SESSION_ID).toBe("sess-1");
-		expect(env.OM_RESULT_PATH).toBe("/home/v/.pi/agent/om/runs/c1.result.json");
+		expect(env.OM_RESULT_PATH).toBe("/tmp/om-runs/c1.result.json");
 		expect(env.OM_MEMORY_DIR).toBeUndefined();
 	});
 
