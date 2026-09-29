@@ -133,5 +133,12 @@ export function buildWorkerEnv(role: "observer" | "consolidator", opts: WorkerLa
 		// Observer worker: which emission mode the run is in (tool registration + prompt +
 		// fail-on-empty all branch on this). Never set for the consolidator.
 		...(role === "observer" ? { OM_OUTPUT_MODE: opts.observerOutputMode ?? "tool-calls" } : {}),
+		// Prose mode is a pure one-shot (no tools): pi's hardcoded 4096-token context safety
+		// margin would otherwise eat half an 8192-ctx window and clamp long slices to a
+		// 1-token completion (clampMaxTokensToContext). Requires the patched pi dist that
+		// reads PI_CONTEXT_SAFETY_TOKENS; unpatched pi ignores it and keeps 4096.
+		...(role === "observer" && (opts.observerOutputMode ?? "tool-calls") === "prose"
+			? { PI_CONTEXT_SAFETY_TOKENS: "512" }
+			: {}),
 	};
 }
