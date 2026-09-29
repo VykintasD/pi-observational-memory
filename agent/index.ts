@@ -89,6 +89,12 @@ export default function omWorker(pi: ExtensionAPI): void {
 				process.stderr.write("om-observer: prose mode produced 0 valid observation lines; failing run\n");
 				process.exit(1);
 			}
+			if (outputMode === "prose" && merged > 0 && !assistantTexts.join("\n").includes("CONFIRMATION:")) {
+				// Soft signal only: a model can skip the mandated final line while still
+				// producing valid observations (observed with Phi-4-mini). Warn for the logs,
+				// do not fail the run — the observations themselves are the contract.
+				process.stderr.write("om-observer: prose mode missing CONFIRMATION line (observations still valid)\n");
+			}
 			ctx.shutdown();
 		});
 		return;

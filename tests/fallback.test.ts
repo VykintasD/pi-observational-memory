@@ -19,6 +19,31 @@ describe("parsePlainTextObservations", () => {
 		]);
 	});
 
+	it("parses the structural-anchor variants (bullet, brackets, or both)", () => {
+		const text = [
+			"- [2026-09-02 01:30]: User fixed the flaky test.",
+			"- 2026-09-02 01:31: User asked a question.",
+			"[2026-09-02 01:32]: Model answered.",
+			"2026-09-02 01:33: Bare format still works.",
+		].join("\n");
+		expect(parsePlainTextObservations(text)).toEqual([
+			{ timestamp: "2026-09-02 01:30", content: "User fixed the flaky test." },
+			{ timestamp: "2026-09-02 01:31", content: "User asked a question." },
+			{ timestamp: "2026-09-02 01:32", content: "Model answered." },
+			{ timestamp: "2026-09-02 01:33", content: "Bare format still works." },
+		]);
+	});
+
+	it("ignores the mandated CONFIRMATION marker line", () => {
+		const text = [
+			"2026-09-02 01:30: User fixed the flaky test.",
+			"CONFIRMATION: Observation pass complete.",
+		].join("\n");
+		expect(parsePlainTextObservations(text)).toEqual([
+			{ timestamp: "2026-09-02 01:30", content: "User fixed the flaky test." },
+		]);
+	});
+
 	it("ignores prose that does not start with a timestamp (confirmation replies, continuation prose)", () => {
 		const text = [
 			"The chunk is fully covered as of 2026-09-02 01:31.",

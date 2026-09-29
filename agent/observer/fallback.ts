@@ -11,10 +11,11 @@
  * them into the result file, so a zero-tool-call run still returns observations
  * instead of silently losing the chunk.
  *
- * The line pattern is deliberately strict — a leading timestamp, a colon, and
- * non-empty content on the same line — so the mandated confirmation reply
- * ("The chunk is fully covered as of …") does NOT match and normal
- * tool-calling runs stay a no-op.
+ * The line pattern requires a leading timestamp and a colon, so the mandated
+ * confirmation reply ("The chunk is fully covered as of …" /
+ * "CONFIRMATION: Observation pass complete.") does NOT match and normal
+ * tool-calling runs stay a no-op. Bullet/bullet-bracket prefixes are
+ * tolerated (see LINE_PATTERN).
  */
 import {
 	readObserverResult,
@@ -22,8 +23,16 @@ import {
 	type RawObservation,
 } from "../../src/spawn/runs.js";
 
-/** One plain-text observation line: "YYYY-MM-DD HH:MM: content". */
-const LINE_PATTERN = /^(\d{4}-\d{2}-\d{2} \d{2}:\d{2})\s*:\s*(.+)$/;
+/**
+ * One plain-text observation line. Accepts both formats the small models
+ * produce:
+ *   "YYYY-MM-DD HH:MM: content"            (mandated prose format)
+ *   "- [YYYY-MM-DD HH:MM]: content"        (structural-anchor variant)
+ * The optional leading "- " bullet and brackets keep the parser robust when
+ * a model adds markdown bullet syntax on its own. The mandated confirmation
+ * line ("CONFIRMATION: ...") never matches: no timestamp prefix.
+ */
+const LINE_PATTERN = /^(?:-\s*)?\[?(\d{4}-\d{2}-\d{2} \d{2}:\d{2})\]?\s*:\s*(.+)$/;
 
 /**
  * Safety cap against degenerate repetition loops (a small model repeating the

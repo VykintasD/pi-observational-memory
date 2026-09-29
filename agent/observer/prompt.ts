@@ -39,53 +39,55 @@ const HOW_YOU_WORK = (mode: Mode) =>
 4. When the chunk is fully covered, STOP calling the tool and reply with a brief plain-text confirmation (one short sentence). That ends the run.`
 		: `How you work:
 1. Read the conversation chunk and identify what information it contains.
-2. Write every observation directly in your reply: exactly ONE observation per line, in the exact format "YYYY-MM-DD HH:MM: <single-line observation>".
-3. When the chunk is fully covered, add a brief plain-text confirmation (one short sentence) after the last observation line. That ends the run.
+2. Write every observation directly in your reply: exactly ONE observation per line, in the exact format "- [YYYY-MM-DD HH:MM]: <single-line observation>".
+3. When the chunk is fully covered, end your reply with the exact final line: CONFIRMATION: Observation pass complete. That ends the run.
 
 Worked example — note that the timestamp of each line is COPIED from the "@" header of the turn it describes, and nothing else is in the reply:
 
 Chunk:
 [Source entry id: x1]
-[User @ 2026-09-29 17:55]: Why does the build fail?
-[Assistant @ 2026-09-29 17:58]: It fails because the auth middleware is missing; fixed it in src/auth/middleware.ts.
+[User @ 2020-01-02 09:14]: Why does the build fail?
+[Assistant @ 2020-01-02 09:15]: It fails because the auth middleware is missing; fixed it in src/auth/middleware.ts.
 
 Your complete reply for that chunk:
-2026-09-29 17:55: User asked why the build fails.
-2026-09-29 17:58: Assistant resolved the build failure: missing auth middleware, fixed at src/auth/middleware.ts.
-Chunk fully covered in 2 lines.`;
+- [2020-01-02 09:14]: User asked why the build fails.
+- [2020-01-02 09:15]: Assistant resolved the build failure: missing auth middleware, fixed at src/auth/middleware.ts.
+CONFIRMATION: Observation pass complete.`;
 
 const OUTPUT_DISCIPLINE = (mode: Mode) =>
 	mode === "tool-calls"
 		? `Output discipline (MANDATORY):
 - Your ONLY permitted outputs are record_observations tool calls and, at the very end, a single short confirmation sentence.
 - Never write prose that continues, answers, or comments on the chunk. Every other word you emit is a failure.
-- If for any reason you are unable to call the tool, output one observation per line in the exact format "YYYY-MM-DD HH:MM: <single-line observation>" — no other text. This fallback format is the only plain text you may ever produce besides the final confirmation.`
+- If for any reason you are unable to call the tool, output one observation per line in the exact format "- [YYYY-MM-DD HH:MM]: <single-line observation>" — no other text. This fallback format is the only plain text you may ever produce besides the final confirmation.`
 		: `Output discipline (MANDATORY):
-- You have NO tools. Your ONLY permitted outputs are observation lines in the exact format "YYYY-MM-DD HH:MM: <single-line observation>", followed at the very end by a single short confirmation sentence.
-- Exactly one observation per line. No blank lines, no markdown, no bullets, no numbering, no code fences, no tool-call syntax. Every word that is not an observation line or the final confirmation is a failure.
+- You have NO tools. Your ONLY permitted outputs are observation lines in the exact format "- [YYYY-MM-DD HH:MM]: <single-line observation>", followed at the very end by the exact line "CONFIRMATION: Observation pass complete.".
+- Exactly one observation per line. No blank lines, no markdown other than the mandated leading bullet, no numbering, no code fences, no tool-call syntax. Every word that is not an observation line or the final confirmation is a failure.
 - Never write prose that continues, answers, or comments on the chunk.`;
 
 const TIMESTAMP_RULES = (mode: Mode) =>
 	mode === "tool-calls"
 		? `Timestamps. Use the timestamp from the relevant conversation message ("YYYY-MM-DD HH:MM", local, to the minute). This goes in the timestamp field, not the content.`
-		: `Timestamps (HARD RULE). The "YYYY-MM-DD HH:MM" prefix of every observation line MUST be COPIED character-for-character from the "@" header of the turn that introduced the event (e.g. "[User @ 2026-09-29 17:55]:" → the line starts with "2026-09-29 17:55:"). Copy the 11 characters exactly — do not retype them from memory, do not round them, do not change any digit. NEVER output the current system time, the time of this run, or any time that is not in a turn header. If an event spans several turns, use the header of the turn in which it is stated.`;
+		: `Timestamps (HARD RULE). The "YYYY-MM-DD HH:MM" prefix of every observation line MUST be COPIED character-for-character from the "@" header of the turn that introduced the event (e.g. "[User @ 2020-01-02 09:14]:" → the line starts with "- [2020-01-02 09:14]:"). Copy all 16 characters exactly — do not retype them from memory, do not round them, do not change any digit. NEVER output the current system time, the time of this run, or any time that is not in a turn header. If an event spans several turns, use the header of the turn in which it is stated.`;
 
 const WHAT_TO_EMIT = (mode: Mode) =>
 	mode === "tool-calls"
 		? `What to emit:
 - Group repeated similar tool calls into a single observation rather than one per call.
+- Long tool results (logs, file dumps, command output): summarize in a single observation what the tool returned (e.g. "bash returned 60 lines of rocm-smi output"). Never transcribe their content line by line.
 - Skip routine, low-information events. It is fine to emit zero observations if the chunk carries no new information — in that case, do not call the tool and end with a plain-text confirmation.
 - If the chunk references earlier context you cannot see, you may call memory_search to ground a fact; keep such calls to at most 1-2, and do not echo their results into your own output.`
 		: `What to emit:
-- Emit AT LEAST ONE observation line per chunk, always. If the chunk genuinely carries no new information, emit exactly one line reading "YYYY-MM-DD HH:MM: (no significant observations)" using the timestamp of the chunk's last turn header.
+- Emit AT LEAST ONE observation line per chunk, always. If the chunk genuinely carries no new information, emit exactly one line reading "- [YYYY-MM-DD HH:MM]: (no significant observations)" using the timestamp of the chunk's last turn header.
 - Aim for roughly one line per turn of the chunk. Cover EVERY turn before you stop — do not end after the first few turns.
 - Group repeated similar tool calls into a single observation rather than one per call.
+- Long tool results (logs, file dumps, command output): summarize in a single observation line what the tool returned (e.g. "bash returned 60 lines of rocm-smi output"). Never transcribe their content line by line.
 - Skip routine, low-information events.`;
 
 const FORMAT_RULE = (mode: Mode) =>
 	mode === "tool-calls"
 		? `- Do NOT include the timestamp inside the content string — it is a separate field.`
-		: `- The line's "YYYY-MM-DD HH:MM" prefix is the timestamp, NOT part of the observation content — treat it as a separate field.`;
+		: `- The line's "- [YYYY-MM-DD HH:MM]" prefix is the timestamp, NOT part of the observation content — treat it as a separate field.`;
 
 const CONTENT_RULES = (mode: Mode) => `Observation content rules:
 
