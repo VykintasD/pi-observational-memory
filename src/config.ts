@@ -12,6 +12,20 @@ export interface ConfiguredModel {
 	thinking?: ModelThinkingLevel;
 }
 
+/**
+ * How the observer worker emits observations. "tool-calls" (default): the worker registers
+ * the record_observations tool and the model is instructed to call it (a strict text fallback
+ * is parsed as a safety net). "prose": the worker registers NO tool — the model must write
+ * every observation as a "YYYY-MM-DD HH:MM: <line>" text line, which the fallback parser
+ * ingests as the primary path. Required for small local models that cannot produce reliable
+ * native tool calls.
+ */
+export type ObserverOutputMode = "tool-calls" | "prose";
+
+export interface ObserverModel extends ConfiguredModel {
+	outputMode: ObserverOutputMode;
+}
+
 export interface Config {
 	/** Raw-history token size of one observation chunk (fixed boundary). */
 	chunkTokens: number;
@@ -34,8 +48,14 @@ export interface Config {
 	journeyTargetTokens: number;
 	/** Max simultaneous in-flight observer subprocesses. */
 	observerConcurrency: number;
+	/**
+	 * Per-block character cap applied to tool result blocks in observer chunks. 0 = unlimited
+	 * (default): full tool output is preserved and small models may fail on oversized prompts.
+	 * Set per profile for small local models (e.g. ~4000 for a 3.8B model).
+	 */
+	toolResultMaxChars: number;
 	models: {
-		observer: ConfiguredModel;
+		observer: ObserverModel;
 		consolidator: ConfiguredModel;
 	};
 	/**
@@ -71,10 +91,11 @@ export const DEFAULTS: Config = {
 	tailTokens: 20_000,
 	journeyTargetTokens: 1_000,
 	observerConcurrency: 4,
+	toolResultMaxChars: 0,
 	displayMode: "bar",
 	resumeAfterMidRunCompaction: true,
 	models: {
-		observer: { provider: "openrouter", id: "z-ai/glm-5.3", thinking: "low" },
+		observer: { provider: "openrouter", id: "z-ai/glm-5.3", thinking: "low", outputMode: "tool-calls" },
 		consolidator: { provider: "openrouter", id: "z-ai/glm-5.3", thinking: "medium" },
 	},
 	passive: false,
@@ -112,6 +133,17 @@ function normalizeModel(value: unknown, fallback: ConfiguredModel): ConfiguredMo
 	return model;
 }
 
+const OUTPUT_MODE_VALUES: readonly ObserverOutputMode[] = ["tool-calls", "prose"];
+
+function normalizeObserverModel(value: unknown, fallback: ObserverModel): ObserverModel {
+	const model = normalizeModel(value, fallback);
+	const rawMode = isRecord(value) ? value.outputMode : undefined;
+	const outputMode = (OUTPUT_MODE_VALUES as readonly string[]).includes(rawMode as string)
+		? (rawMode as ObserverOutputMode)
+		: fallback.outputMode;
+	return { ...model, outputMode };
+}
+
 /**
  * The normalized shape of one settings block: like Partial<Config> but with models allowed
  * to be present per-model (a block may set only `models.observer`).
@@ -143,6 +175,9 @@ function normalizeSettingsConfig(value: Record<string, unknown>, base: Config): 
 	}
 	// chunkOverlapTokens may legitimately be 0.
 	if (value.chunkOverlapTokens === 0) normalized.chunkOverlapTokens = 0;
+	// toolResultMaxChars may legitimately be 0 (explicitly unlimited).
+	if (typeof value.toolResultMaxChars === "number" && Number.isInteger(value.toolResultMaxChars) && value.toolResultMaxChars >= 0)
+		normalized.toolResultMaxChars = value.toolResultMaxChars;
 	if (typeof value.resumeAfterMidRunCompaction === "boolean")
 		normalized.resumeAfterMidRunCompaction = value.resumeAfterMidRunCompaction;
 	const displayModes = ["bar", "dense", "off"] as const;
@@ -152,7 +187,7 @@ function normalizeSettingsConfig(value: Record<string, unknown>, base: Config): 
 	if (typeof value.debugLog === "boolean") normalized.debugLog = value.debugLog;
 	if (isRecord(value.models)) {
 		const models: Partial<Config["models"]> = {};
-		if (isRecord(value.models.observer)) models.observer = normalizeModel(value.models.observer, base.models.observer);
+		if (isRecord(value.models.observer)) models.observer = normalizeObserverModel(value.models.observer, base.models.observer);
 		if (isRecord(value.models.consolidator))
 			models.consolidator = normalizeModel(value.models.consolidator, base.models.consolidator);
 		if (models.observer || models.consolidator) normalized.models = models;

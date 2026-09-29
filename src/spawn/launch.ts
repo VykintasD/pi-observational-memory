@@ -109,6 +109,8 @@ export type WorkerLaunchEnv = {
 	runId: string;
 	/** Session key for the consolidator's om-CLI memory tools; ignored by the observer. */
 	sessionId?: string;
+	/** Observer only: the configured output mode ("tool-calls" | "prose"); ignored by the consolidator. */
+	observerOutputMode?: string;
 };
 
 /**
@@ -128,5 +130,8 @@ export function buildWorkerEnv(role: "observer" | "consolidator", opts: WorkerLa
 		// Session key for the consolidator's memory tools (the durable store is addressed by
 		// session id, not by a directory).
 		...(role === "consolidator" ? { OM_SESSION_ID: opts.sessionId ?? "" } : {}),
+		// Observer worker: which emission mode the run is in (tool registration + prompt +
+		// fail-on-empty all branch on this). Never set for the consolidator.
+		...(role === "observer" ? { OM_OUTPUT_MODE: opts.observerOutputMode ?? "tool-calls" } : {}),
 	};
 }

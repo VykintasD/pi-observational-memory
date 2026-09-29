@@ -37,7 +37,11 @@ consolidator draining the oldest observations into the durable om store.
 - **Observer clock** (`turn_end` / `agent_start`): every `chunkTokens` of new raw history,
   cut a fixed-token slice and fire an observer subprocess. Observers are embarrassingly
   parallel pure mappers (capped by `observerConcurrency`); each commits its own
-  `coversUpToId` watermark, so out-of-order completion is fine.
+  `coversUpToId` watermark, so out-of-order completion is fine. A **failed** observer does not
+  lose its chunk: the in-memory watermark rolls back to where the failed run started (never
+  forward, so concurrent later runs are unaffected) and the slice is re-dispatched on a later
+  turn — at most 3 attempts, ≥30 s apart. After the final failure the chunk is skipped and a
+  single warning toast names the lost content.
 - **Observation** = `{ timestamp, content, tokenCount }`. The precise event-`timestamp`
   doubles as the id; the orchestrator re-derives a unique, second-resolution id at commit
   (the observer only emits minute resolution).
@@ -109,6 +113,7 @@ Namespace `observational-memory` in `~/.pi/agent/settings.json` (global) or
     "tailTokens": 20000,                 // verbatim tail; snaps to a chunk boundary
     "journeyTargetTokens": 1000,         // pushed journey size; compress oldest segments past this
     "observerConcurrency": 4,
+    "toolResultMaxChars": 0,             // cap on serialized tool-result size in observer chunks; 0 = unlimited (default)
     "models": {
       "observer":     { "provider": "anthropic", "id": "claude-sonnet-4-6", "thinking": "low" },
       "consolidator": { "provider": "anthropic", "id": "claude-sonnet-4-6", "thinking": "medium" }
@@ -119,6 +124,14 @@ Namespace `observational-memory` in `~/.pi/agent/settings.json` (global) or
   }
 }
 ```
+
+`toolResultMaxChars` caps the **character size of tool results inside serialized observer
+chunks** (the chunks the observer subprocess receives): any tool result longer than the cap is
+tiered-truncated — 80% head + 20% tail with a `… [truncated N chars] …` marker — while user and
+assistant messages pass through untouched. `0` (the default) leaves tool results unbounded. Set
+it per profile when the observer is a small local model: oversized tool results in the source
+conversation otherwise blow the small context window (e.g. `4000` for a 16k-context Phi-4-mini
+profile).
 
 A block may name a **named profile** — the mechanism for context-size modes, e.g. a ~20k-context
 profile where compaction and consolidation run far more often — and direct keys in the same block

@@ -41,9 +41,31 @@ describe("resolveNamespacedBlock (named profiles)", () => {
 			},
 			DEFAULTS,
 		);
-		// Profile's observer kept, direct's consolidator kept; unset model fields (thinking) inherit from base.
-		expect(partial.models?.observer).toEqual({ provider: "google", id: "gemini", thinking: "low" });
+		// Profile's observer kept, direct's consolidator kept; unset model fields (thinking)
+		// inherit from base, as does the observer's outputMode.
+		expect(partial.models?.observer).toEqual({ provider: "google", id: "gemini", thinking: "low", outputMode: "tool-calls" });
 		expect(partial.models?.consolidator).toEqual({ provider: "openrouter", id: "glm", thinking: "medium" });
+	});
+
+	it("normalizes the observer outputMode (explicit value kept, unknown value falls back)", () => {
+		const prose = resolveNamespacedBlock(
+			{ models: { observer: { provider: "local-llama", id: "qwen2.5-coder-3b", outputMode: "prose" } } },
+			DEFAULTS,
+		).partial;
+		expect(prose.models?.observer.outputMode).toBe("prose");
+
+		const bad = resolveNamespacedBlock(
+			{ models: { observer: { provider: "openrouter", id: "glm", outputMode: "yolo" } } },
+			DEFAULTS,
+		).partial;
+		expect(bad.models?.observer.outputMode).toBe("tool-calls");
+
+		// outputMode is an observer-only field; it is never normalized onto the consolidator.
+		const cons = resolveNamespacedBlock(
+			{ models: { consolidator: { provider: "openrouter", id: "glm" } } },
+			DEFAULTS,
+		).partial;
+		expect(cons.models?.consolidator).not.toHaveProperty("outputMode");
 	});
 
 	it("an unknown profile name is ignored (no overrides, no name)", () => {
@@ -63,6 +85,21 @@ describe("resolveNamespacedBlock (named profiles)", () => {
 	it("profile keys are not themselves knobs", () => {
 		const { partial } = resolveNamespacedBlock({ profile: "p", profiles: { p: { chunkTokens: 4000 } } }, DEFAULTS);
 		expect(Object.keys(partial).sort()).toEqual(["chunkTokens"]);
+	});
+
+	it("toolResultMaxChars accepts 0 (explicitly unlimited) and positive caps", () => {
+		const { partial } = resolveNamespacedBlock(
+			{ profile: "small", profiles: { small: { toolResultMaxChars: 0 }, tiny: { toolResultMaxChars: 4000 } } },
+			DEFAULTS,
+		);
+		expect(partial.toolResultMaxChars).toBe(0);
+		const { partial: capped } = resolveNamespacedBlock({ toolResultMaxChars: 4000 }, DEFAULTS);
+		expect(capped.toolResultMaxChars).toBe(4000);
+	});
+
+	it("toolResultMaxChars rejects non-integers and negatives", () => {
+		const { partial } = resolveNamespacedBlock({ toolResultMaxChars: -100, profiles: { p: { toolResultMaxChars: 12.5 } } }, DEFAULTS);
+		expect(partial.toolResultMaxChars).toBeUndefined();
 	});
 });
 
@@ -133,6 +170,16 @@ describe("loadConfig (profile across settings files)", () => {
 		const config = loadConfig(tmp, {}, { globalPath, projectPath });
 		expect(config.chunkTokens).toBe(DEFAULTS.chunkTokens);
 		expect(config.activeProfile).toBeUndefined();
+	});
+
+	it("a profile's toolResultMaxChars=0 (unlimited) survives the merge; a positive cap applies", () => {
+		expect(DEFAULTS.toolResultMaxChars).toBe(0);
+		writeGlobal({
+			"observational-memory": { profile: "local-phi", profiles: { "local-phi": { toolResultMaxChars: 2000 } } },
+		});
+		expect(loadConfig(tmp, {}, { globalPath, projectPath }).toolResultMaxChars).toBe(2000);
+		writeProject({ "observational-memory": { toolResultMaxChars: 0 } });
+		expect(loadConfig(tmp, {}, { globalPath, projectPath }).toolResultMaxChars).toBe(0);
 	});
 });
 

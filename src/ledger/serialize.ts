@@ -27,6 +27,34 @@ export function truncateRecordContent(content: string): string {
 	return `${head} … [truncated ${dropped} chars]`;
 }
 
+/**
+ * Per-serialization options. Applied by the observer chunk path; the consolidator and
+ * compaction paths keep default (unlimited) behavior unless they opt in.
+ */
+export type SerializationOptions = {
+	/**
+	 * Per-block character cap applied ONLY to tool result blocks. 0 or undefined = unlimited
+	 * (default). When applied, each tool result block keeps its head (80% of the cap) and its
+	 * tail (20% of the cap) with an explicit truncation marker between them.
+	 */
+	toolResultMaxChars?: number;
+};
+
+/**
+ * Tiered truncation: keep the head (80% of maxChars) and the tail (20% of maxChars) with an
+ * explicit marker in between. Head-first because tool results (file reads, search hits)
+ * front-load the most relevant content. No-op when maxChars is 0/negative or the text fits.
+ */
+export function tieredTruncate(text: string, maxChars: number): string {
+	if (maxChars <= 0 || text.length <= maxChars) return text;
+	const headLen = Math.floor(maxChars * 0.8);
+	const tailLen = maxChars - headLen;
+	const head = text.slice(0, headLen);
+	const tail = text.slice(text.length - tailLen);
+	const dropped = text.length - maxChars;
+	return `${head}\n… [truncated ${dropped} chars] …\n${tail}`;
+}
+
 function textAndPlaceholders(content: unknown, options: { includeThinking?: boolean } = {}): string {
 	if (typeof content === "string") return content;
 	if (!Array.isArray(content)) return "[non-text content omitted]";
@@ -68,7 +96,7 @@ function textOnly(content: unknown): string {
 		.join("\n");
 }
 
-export function serializeConversation(messages: Message[]): string {
+export function serializeConversation(messages: Message[], options: SerializationOptions = {}): string {
 	return messages
 		.map((msg): string | null => {
 			const time = formatTimestamp(msg.timestamp);
@@ -83,7 +111,8 @@ export function serializeConversation(messages: Message[]): string {
 				if (!body) return null;
 				return `[Assistant @ ${time}]: ${body}`;
 			}
-			return `[Tool result for ${(msg as ToolResultMessage).toolName} @ ${time}]: ${textOnly(msg.content)}`;
+			const body = textOnly(msg.content);
+			return `[Tool result for ${(msg as ToolResultMessage).toolName} @ ${time}]: ${tieredTruncate(body, options.toolResultMaxChars ?? 0)}`;
 		})
 		.filter((line): line is string => line !== null)
 		.join("\n\n");
@@ -114,11 +143,11 @@ function renderCustomMessage(entry: RenderableEntry): string {
 	return `[${tag} @ ${time}]: ${text}`;
 }
 
-export function serializeBranchEntries(entries: RenderableEntry[]): string {
+export function serializeBranchEntries(entries: RenderableEntry[], options: SerializationOptions = {}): string {
 	const blocks: string[] = [];
 	for (const entry of entries) {
 		if (entry.type === "message" && entry.message) {
-			const part = serializeConversation([entry.message as Message]);
+			const part = serializeConversation([entry.message as Message], options);
 			if (part) blocks.push(part);
 			continue;
 		}
@@ -148,12 +177,15 @@ function isSourceRenderableEntry(entry: RenderableEntry): boolean {
  * with its source entry id. v1 observations carry no `sourceEntryIds`, but the labels keep
  * the chunk readable and let the orchestrator anchor timestamps to bounding source entries.
  */
-export function serializeSourceAddressedBranchEntries(entries: RenderableEntry[]): SourceAddressedSerialization {
+export function serializeSourceAddressedBranchEntries(
+	entries: RenderableEntry[],
+	options: SerializationOptions = {},
+): SourceAddressedSerialization {
 	const blocks: string[] = [];
 	const sourceEntryIds: string[] = [];
 	for (const entry of entries) {
 		if (!entry.id || !isSourceRenderableEntry(entry)) continue;
-		const rendered = serializeBranchEntries([entry]);
+		const rendered = serializeBranchEntries([entry], options);
 		if (!rendered.trim()) continue;
 		sourceEntryIds.push(entry.id);
 		blocks.push(`[Source entry id: ${entry.id}]\n${rendered}`);

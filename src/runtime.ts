@@ -30,9 +30,11 @@ export class Runtime {
 	 * In-flight observer subprocesses, keyed by runId. `coversUpToId` is the source-entry id at
 	 * the END of the observer's chunk — it lets compaction decide whether the observer can affect
 	 * the rendered block (an observer whose chunk lands entirely in the verbatim tail is excluded
-	 * from the projection regardless, so compaction need not wait for it).
+	 * from the projection regardless, so compaction need not wait for it). `fromId` is the effective
+	 * watermark at the moment this run was dispatched (the chunk's start) — the rollback target if
+	 * the run fails.
 	 */
-	readonly observersInFlight = new Map<string, { controller: AbortController; coversUpToId: string }>();
+	readonly observersInFlight = new Map<string, { controller: AbortController; coversUpToId: string; fromId?: string }>();
 
 	/** In-flight observer async tasks, so compaction can wait for settled memory state (design R5). */
 	readonly observerTasks = new Set<Promise<void>>();
@@ -53,6 +55,15 @@ export class Runtime {
 	 * worst case a chunk is re-observed).
 	 */
 	dispatchedCoversUpToId: string | undefined;
+
+	/**
+	 * Retry budget for failed observation chunks, keyed by the slice's coversUpToId. A failed chunk
+	 * is reselected on later turns up to MAX_SLICE_ATTEMPTS times, with a minimum 30 s cooldown
+	 * between attempts; after the final failure the watermark is advanced past the chunk (single
+	 * warning toast) and the entry is deleted. In-memory only — lost on resume (harmless; worst
+	 * case a chunk is re-observed).
+	 */
+	readonly sliceFailures = new Map<string, { attempts: number; lastAttemptAt: number }>();
 
 	/** Guards so compaction trigger + hook never re-enter. */
 	compactInFlight = false;
