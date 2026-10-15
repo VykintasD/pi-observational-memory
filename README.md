@@ -2,18 +2,26 @@
 
 Tiered, subprocess-backed memory for pi.
 
-Parallel **observers** distill raw conversation chunks into atomic observations committed to the master's branch-local **ledger** (so memory stays correct under `/tree`); a deterministic, model-free **compaction** renders that buffer verbatim into the compaction block. A **consolidator** promotes the oldest observations into the **durable om store** (one global SQLite database, rows keyed per session), bounding the buffer and giving each session durable, searchable long-term memory that the master can read with the read-only `om_memory` tool (a fork seeds its memory from its parent).
+Parallel observer processes distill raw conversation chunks into atomic
+observations. The observations go to the master's branch-local ledger, so
+memory stays correct when you use pi's session branching (`/tree`). A
+deterministic, model-free compaction step renders the ledger into the
+compaction block. A consolidator process moves the oldest observations into
+the durable om store: one global SQLite database with rows keyed per
+session. The master reads the store with the read-only `om_memory` tool. A
+forked session starts with a copy of its parent's memory rows.
 
-## On/off gate (default OFF)
+## On/off gate (default: off)
 
-The extension ships in the global extensions folder during development, so it is **gated off
-per session** and is completely invisible until you turn it on.
+Memory workers cost tokens and money, so the extension does nothing until
+you turn it on for a session.
 
 - `/om` — toggle for this session
 - `/om on` / `/om off` — set explicitly
 
-State persists per session in the ledger (`om.enabled`) and survives resume. When off, every
-trigger, hook, widget, and subprocess returns immediately.
+The setting persists per session in the ledger (`om.enabled`) and survives
+resume. When the gate is off, every trigger, hook, widget, and subprocess
+returns immediately.
 
 ## How it works
 
@@ -22,67 +30,74 @@ flowchart LR
     A["raw chunks<br/><i>token-bounded, fixed slices</i>"]
     B["parallel observers<br/><i>subprocess pi, headless</i>"]
     C["observations<br/><i>{timestamp, content}</i>"]
-    D["master ledger<br/><i>branch-local, /tree-correct</i>"]
+    D["master ledger<br/><i>branch-local</i>"]
     E["compaction block<br/><i>deterministic, model-free</i>"]
     F["consolidator<br/><i>subprocess pi, one at a time</i>"]
-    G["om store (global SQLite)<br/><i>durable, per-session rows, searchable;<br/>tombstones drain buffer</i>"]
+    G["om store (global SQLite)<br/><i>durable, per-session rows, searchable</i>"]
 
     A --> B --> C --> D --> E
     D -- "oldest overflow<br/>(pool > consolidateAtPoolTokens)" --> F --> G
 ```
 
-Pipeline: raw chunks → observers → observations → ledger → compaction block, with a
-consolidator draining the oldest observations into the durable om store.
+- **Observer clock** (`turn_end` / `agent_start`): when the conversation
+  gains `chunkTokens` new tokens, the orchestrator cuts a fixed-token slice
+  and starts an observer subprocess. Observers run in parallel;
+  `observerConcurrency` sets the limit. Each observer commits its own
+  `coversUpToId` watermark, so observers may finish in any order.
+- **Observation** = `{ timestamp, content, tokenCount }`. The event
+  timestamp is also the id. The orchestrator converts the minute-resolution
+  timestamp from the observer into a unique second-resolution id at commit.
+- **Compaction** (`agent_end`, when the context exceeds
+  `compactAtContextTokens` and the session is idle): the orchestrator waits
+  for observers in flight, then builds the compaction block from the active
+  buffer, a **memory map** (rendered live from the store's topic index),
+  and a **journey** section (the session's journey row, verbatim). The
+  cutoff snaps to an observation chunk boundary, so the verbatim tail never
+  double-represents history.
+- **Consolidator clock** (`turn_end` / `agent_start`): when the observation
+  pool exceeds `consolidateAtPoolTokens`, one background consolidator
+  subprocess folds the oldest observations into the durable om store, until
+  the pool returns to `poolTargetTokens`. The orchestrator then tombstones
+  exactly the observations that the consolidator reports. Store rows belong
+  to the session, keyed by the immutable session-header id, so two sessions
+  in the same project never share output. The rows follow the session, not
+  the branch: `/tree` does not roll them back. When you fork or clone a
+  session, the new session copies the parent's rows once, on first touch,
+  and only if its own store is empty (`om fork-copy`). This matches the
+  ledger, which already travels with the fork. The consolidator addresses
+  topics by slug through its own `ls`/`grep`/`read`/`write`/`edit` tools,
+  which the worker extension provides as shims over the store. The reserved
+  slug `JOURNEY` addresses the session's journey row.
+- **Journey** (the session's journey row in the store): one descriptive
+  prose history of how the work reached its current state. The consolidator
+  maintains it, and the orchestrator includes it in every compaction block
+  for orientation, not for recall. Each consolidation adds a short dated
+  segment. The consolidator compresses the oldest segments only after the
+  journey exceeds `journeyTargetTokens`, so recent history stays detailed
+  and the section stays bounded. Like the topics, the journey does not roll
+  back under `/tree`.
 
-- **Observer clock** (`turn_end` / `agent_start`): every `chunkTokens` of new raw history,
-  cut a fixed-token slice and fire an observer subprocess. Observers are embarrassingly
-  parallel pure mappers (capped by `observerConcurrency`); each commits its own
-  `coversUpToId` watermark, so out-of-order completion is fine.
-- **Observation** = `{ timestamp, content, tokenCount }`. The precise event-`timestamp`
-  doubles as the id; the orchestrator re-derives a unique, second-resolution id at commit
-  (the observer only emits minute resolution).
-- **Compaction** (`agent_end` over `compactAtContextTokens`, when idle): waits for in-flight
-  observers, then renders the active buffer plus a **memory map** (rendered live from the store's
-  topic index) and a **journey** section (the session's journey row, read verbatim). The cutoff snaps to an observation chunk boundary so the verbatim tail is never
-  double-represented.
-- **Consolidator clock** (`turn_end` / `agent_start`): when the active observation pool
-  exceeds `consolidateAtPoolTokens`, a single background consolidator subprocess folds the
-  **oldest** observations (above `poolTargetTokens`) into the durable om store, then the
-  orchestrator tombstones exactly the observations it reports — draining the buffer back toward
-  target. Store rows are **scoped per session** (keyed by the immutable session-header id, so two
-  sessions in the same project never share output) and track the session, not the branch: they are
-  **not** rolled back by `/tree`. On a fork/clone the new session's rows are **copied once** from
-  the parent (`om fork-copy`, only if the destination is empty — matching the ledger, which
-  already travels with the fork). The consolidator addresses topics **by slug** through its own
-  `ls`/`grep`/`read`/`write`/`edit` tools (shims over the store); the reserved slug `JOURNEY`
-  addresses the session's journey row.
-- **Journey** (the session's journey row in the store): a single, whole-project, purely
-  **descriptive** prose history of how the work got to its current state, maintained by the
-  consolidator and pushed into every compaction block for **orientation** (not recall, not
-  instructions). It is append-mostly: each consolidation adds a short dated segment and compresses
-  the oldest segments only once the journey exceeds `journeyTargetTokens`, so recent history stays
-  detailed and the section stays bounded. Like topics it does **not** roll back under `/tree`.
-
-Each worker is an **ordinary recorded pi session** in the global store
-(`~/.pi/agent/sessions`, under the project path) — open it in the session browser to see the
-exact input chunk, tool calls, and output. Transient handoff files live in
-`~/.pi/agent/om/runs/`.
+Each worker run is an ordinary recorded pi session, stored under
+`~/.pi/agent/sessions` inside the project path. Open a run in the session
+browser to see its input chunk, tool calls, and output. Transient handoff
+files live in `~/.pi/agent/om/runs/`.
 
 ### Cost tracking
 
-Every worker is a `pi` subprocess, so its spend is captured from pi's **built-in**
-`usage.cost.total` (reliable, already computed). The worker extension — *not* the model —
-accumulates that figure and hands it back via the run's cost file
-(`~/.pi/agent/om/runs/<runId>.cost.json`), alongside the existing observation IPC. The orchestrator
-folds each run into an `om.cost` ledger entry.
+Each worker is a `pi` subprocess, so the extension takes its cost from pi's
+built-in `usage.cost.total`. The worker extension, not the model,
+accumulates the figure and returns it in the run's cost file
+(`~/.pi/agent/om/runs/<runId>.cost.json`), next to the observation IPC
+file. The orchestrator adds each run's cost to an `om.cost` ledger entry.
 
-- **Ephemeral-safe:** cost rides the result-file IPC, never a saved session log, so it works
-  even if a worker session is not persisted.
-- **Never rolls back:** the running total sums *all* `om.cost` entries across the whole
-  session (every branch), so real money spent does not decrease under `/tree` — the same
-  tier rule as the durable store.
-- **Surfaced** in the footer (`$0.000`, right of the gauges) and in `/om:status`
-  (`session cost: $X (N runs)`). Survives resume.
+- **Ephemeral-safe:** the cost travels in the result-file IPC, never in a
+  saved session log. This works even when pi does not persist the worker
+  session.
+- **Never rolls back:** the running total sums all `om.cost` entries across
+  every branch of the session, so `/tree` cannot reduce real money already
+  spent. The durable store follows the same rule.
+- **Surfaced** in the footer (`$0.000`, right of the gauges) and in
+  `/om:status` (`session cost: $X (N runs)`). Survives resume.
 
 ## Commands
 
@@ -95,8 +110,11 @@ folds each run into an `om.cost` ledger entry.
 
 ## Configuration
 
-Namespace `observational-memory` in `~/.pi/agent/settings.json` (global) or
-`.pi/settings.json` (project; overrides global):
+Put the settings in the `observational-memory` block of
+`~/.pi/agent/settings.json` (global) or `.pi/settings.json` (project).
+Project settings override global settings. All keys are optional; the
+defaults appear below. The example uses the `anthropic` provider; choose
+any provider that pi supports.
 
 ```jsonc
 {
@@ -105,7 +123,7 @@ Namespace `observational-memory` in `~/.pi/agent/settings.json` (global) or
     "chunkOverlapTokens": 0,
     "poolTargetTokens": 10000,           // buffer drains back toward this after consolidation
     "consolidateAtPoolTokens": 20000,    // pool size that triggers a consolidation (200% of target)
-    "compactAtContextTokens": 100000,    // tune per model
+    "compactAtContextTokens": 100000,    // set below the context window of your main model
     "tailTokens": 20000,                 // verbatim tail; snaps to a chunk boundary
     "journeyTargetTokens": 1000,         // pushed journey size; compress oldest segments past this
     "observerConcurrency": 4,
@@ -120,9 +138,11 @@ Namespace `observational-memory` in `~/.pi/agent/settings.json` (global) or
 }
 ```
 
-A block may name a **named profile** — the mechanism for context-size modes, e.g. a ~20k-context
-profile where compaction and consolidation run far more often — and direct keys in the same block
-override individual profile knobs (models merge per-model across profile and direct keys):
+A block may name a **named profile**. A profile groups the knobs above for
+one main-model size, for example a 20k-context profile where compaction and
+consolidation must run more often. Direct keys in the same block override
+individual profile knobs. Models merge per model across the profile and
+the direct keys.
 
 ```jsonc
 {
@@ -139,31 +159,35 @@ override individual profile knobs (models merge per-model across profile and dir
 }
 ```
 
-An unknown profile name is ignored; precedence across files is unchanged (defaults < global <
-project < env). `/om:status` shows the active profile.
+If the profile name is unknown, pi ignores it and uses the direct keys.
+Settings precedence, lowest first: defaults, global settings, project
+settings, environment variables. `/om:status` shows the active profile.
 
-`PI_OM_PASSIVE=1` forces `passive` (disables all triggers) for clean `/tree` testing.
-`passive` is a power-user setting distinct from the on/off gate.
+`PI_OM_PASSIVE=1` forces `passive` mode, which disables all triggers. Use
+this for clean `/tree` testing. `passive` is for advanced users and is
+separate from the on/off gate.
 
 ### Display mode (`displayMode`)
 
-`bar` (default) is the current look: gauges live in the footer status line, and worker
-indicators stack as transient widgets above it. `dense` keeps the footer as a bare `om` label
-and renders a permanent two-line widget instead — line 1 carries the three gauges with numeric
-`value/max` readouts (plus worker indicators), line 2 a detail line (active obs, topics, journey
-size vs target, consolidator state, session cost, last worker error). `off` renders no footer
-and no widget. The mode can live in a named profile and is reported by `/om:status`.
+`bar` (default) puts the gauges in the footer status line and stacks the
+worker indicators as transient widgets above it. `dense` keeps the footer as
+a bare `om` label and renders one permanent two-line widget instead: line 1
+has the three gauges with numeric `value/max` readouts and the worker
+indicators; line 2 has a detail line (active observations, topics, journey
+size against target, consolidator state, session cost, last worker error).
+`off` renders no footer and no widget. The mode can live in a named profile
+and is reported by `/om:status`. The footer has only one line, so `dense`
+must render as a widget above the input instead of in the status line.
 
-Switch it live with **`/om:display bar|dense|off`** — applies to the current session only,
-no file edit, no reload (typing `/om:display ` offers the three modes as completions; bare
-`/om:display` shows the active mode, and `/om:status` flags an override against the configured
-value). Note the footer is a single-line surface, so
-the two-line dense mode necessarily renders as a widget above the input rather than in the
-status line itself.
+Switch the mode live with **`/om:display bar|dense|off`**. This applies to
+the current session only, with no file edit and no reload. Type
+`/om:display ` to see the three modes as completions. `/om:display` with no
+argument shows the active mode. `/om:status` marks an override against the
+configured value.
 
 ## Development
 
-Setting it up on a new machine: see [SETUP.md](SETUP.md).
+To set the project up on a machine, see [SETUP.md](SETUP.md).
 
 ```bash
 npm install
@@ -171,12 +195,16 @@ npm test          # vitest
 npm run typecheck # tsc --noEmit
 ```
 
-Layout: `src/` is the master-side orchestrator (entry `src/index.ts`); `agent/` is the shared
-worker extension loaded into subprocesses via `-e` (`OM_WORKER=observer|consolidator`); the Go
-CLI in `cli/` (committed binary `cli/om`) is the only component that touches the database.
-Long-term memory lives in one global SQLite database (`~/.pi/agent/om/om.db`; override with
-`OM_DB` or `--db`), with rows keyed by the immutable session-header id so sessions in the same
-project stay isolated; a fork copies its parent's rows once on first touch (`om fork-copy`).
-The master reads the store through the read-only `om_memory` tool (`list` | `get <slug>` |
-`search <pattern>`); writes happen only in the background consolidator. Transient worker IPC
-lives under `~/.pi/agent/om/runs/`.
+Layout: `src/` is the master-side orchestrator (entry `src/index.ts`);
+`agent/` is the shared worker extension, which subprocesses load with `-e`
+(`OM_WORKER=observer|consolidator`); the Go CLI in `cli/` is the only
+component that touches the database. The CLI binary is build output and is
+not committed; build it with `bash cli/build.sh` (see SETUP.md §3).
+Long-term memory lives in one global SQLite database
+(`~/.pi/agent/om/om.db`; override with `OM_DB` or `--db`). Rows are keyed
+by the immutable session-header id, so sessions in the same project stay
+isolated. A fork copies its parent's rows once on first touch
+(`om fork-copy`). The master reads the store through the read-only
+`om_memory` tool (`list` | `get <slug>` | `search <pattern>`); writes
+happen only in the background consolidator. Transient worker IPC lives
+under `~/.pi/agent/om/runs/`.
