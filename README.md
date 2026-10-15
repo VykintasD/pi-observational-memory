@@ -163,6 +163,8 @@ status line itself.
 
 ## Development
 
+Setting it up on a new machine: see [SETUP.md](SETUP.md).
+
 ```bash
 npm install
 npm test          # vitest
