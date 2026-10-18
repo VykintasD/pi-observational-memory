@@ -67,8 +67,8 @@ Add an `observational-memory` block to the same settings file:
 ```json
 "observational-memory": {
   "models": {
-    "observer":     { "provider": "anthropic", "id": "claude-sonnet-4-6", "thinking": "low" },
-    "consolidator": { "provider": "anthropic", "id": "claude-sonnet-4-6", "thinking": "medium" }
+    "observer":     { "provider": "google", "id": "gemini-3.5-flash-lite" },
+    "consolidator": { "provider": "google", "id": "gemini-3.5-flash-lite" }
   },
   "compactAtContextTokens": 100000
 }
